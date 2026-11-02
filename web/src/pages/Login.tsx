@@ -25,9 +25,9 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen grid lg:grid-cols-2">
-      {/* Brand panel (charcoal) — hidden below lg */}
-      <div className="hidden lg:flex flex-col justify-between bg-charcoal-900 p-12 text-white relative overflow-hidden">
+    <div className="min-h-screen grid md:grid-cols-2">
+      {/* Brand panel (charcoal) — hidden below md */}
+      <div className="hidden md:flex flex-col justify-between bg-charcoal-900 p-12 text-white relative overflow-hidden">
         <div className="absolute inset-0 opacity-[0.08]" style={{ backgroundImage: 'radial-gradient(circle at 20% 20%, #3b6ea5 0, transparent 42%), radial-gradient(circle at 80% 70%, #4d4d4d 0, transparent 45%)' }} />
 
         {/* top spacer to balance the footer so the centrepiece sits in the true middle */}
@@ -62,7 +62,7 @@ export default function Login() {
       <div className="flex items-center justify-center bg-slate-50 p-6">
         <div className="w-full max-w-sm">
           {/* Mobile/narrow: dark-on-light logo above the card (charcoal icon + wordmark) */}
-          <div className="lg:hidden mb-8 flex justify-center"><Wordmark /></div>
+          <div className="md:hidden mb-8 flex justify-center"><Wordmark /></div>
           <div className="card p-8">
             <div className="mb-6">
               <div className="flex items-center gap-2 text-navy-900"><Lock size={18} className="text-accent" /><h2 className="text-lg font-bold">Sign in</h2></div>
