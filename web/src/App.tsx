@@ -3,6 +3,7 @@ import { useAuth } from './lib/auth';
 import { AppShell } from './components/Layout';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
+import CaseHome from './pages/CaseHome';
 import CaseWorkspace from './pages/CaseWorkspace';
 import DocumentViewer from './pages/DocumentViewer';
 import AddCaseData from './pages/AddCaseData';
@@ -21,7 +22,8 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
-      <Route path="/cases/:caseId" element={<Protected><CaseWorkspace /></Protected>} />
+      <Route path="/cases/:caseId" element={<Protected><CaseHome /></Protected>} />
+      <Route path="/cases/:caseId/review" element={<Protected><CaseWorkspace /></Protected>} />
       <Route path="/cases/:caseId/import" element={<Protected><AddCaseData /></Protected>} />
       <Route path="/cases/:caseId/documents/:docId" element={<Protected><DocumentViewer /></Protected>} />
       <Route path="/admin" element={<Protected><Admin /></Protected>} />

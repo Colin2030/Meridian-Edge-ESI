@@ -44,6 +44,99 @@ router.get('/:caseId', requireAuth, requireCaseRole('read_only'), async (req: Au
   res.json({ ...rows[0], role: (req as any).caseRole, tags, folders, statusCounts });
 });
 
+// ---- Early Case Assessment (ECA) metrics -----------------------------------
+// Read-only aggregate metrics for the case landing page. All counts are grouped
+// aggregates over already-indexed data (no per-row loops, no ESI processing).
+// RBAC: any case member (read_only+). Audited as 'eca_view'.
+router.get('/:caseId/eca', requireAuth, requireCaseRole('read_only'), async (req: AuthedRequest, res) => {
+  const caseId = (req as any).caseId;
+  const caseRow = (await query<any>(`SELECT * FROM cases WHERE id=$1`, [caseId])).rows[0];
+  if (!caseRow) return res.status(404).json({ error: 'Case not found' });
+
+  // Headline counts in one pass over documents.
+  const totals = (await query<any>(
+    `SELECT count(*)::int AS total_documents,
+            count(*) FILTER (WHERE metadata->>'DOCTYPE' ILIKE 'email')::int AS email_count,
+            count(DISTINCT NULLIF(trim(metadata->>'CUSTODIAN'), ''))::int AS custodian_count
+     FROM documents WHERE case_id=$1`, [caseId]
+  )).rows[0];
+  const totalDocuments = totals.total_documents;
+
+  // Custodian breakdown (non-empty, trimmed), most documents first.
+  const custodians = (await query<any>(
+    `SELECT trim(metadata->>'CUSTODIAN') AS custodian, count(*)::int AS doc_count
+     FROM documents
+     WHERE case_id=$1 AND NULLIF(trim(metadata->>'CUSTODIAN'), '') IS NOT NULL
+     GROUP BY trim(metadata->>'CUSTODIAN')
+     ORDER BY count(*) DESC, custodian ASC`, [caseId]
+  )).rows;
+
+  // Document-type breakdown (cheap context metric; easy to extend later).
+  const doctypes = (await query<any>(
+    `SELECT COALESCE(NULLIF(trim(metadata->>'DOCTYPE'), ''), 'Unknown') AS doctype, count(*)::int AS count
+     FROM documents WHERE case_id=$1
+     GROUP BY COALESCE(NULLIF(trim(metadata->>'DOCTYPE'), ''), 'Unknown')
+     ORDER BY count(*) DESC, doctype ASC`, [caseId]
+  )).rows;
+
+  // Tag summary: every tag in the case with its document count (incl. zero), so
+  // the structure (and nesting via parent_id) is visible on the ECA page.
+  const tagSummary = (await query<any>(
+    `SELECT t.id AS "tagId", t.name, t.colour, t.parent_id AS "parentId",
+            (SELECT count(*)::int FROM document_tags dt JOIN documents d ON d.id=dt.document_id
+             WHERE dt.tag_id=t.id AND d.case_id=$1) AS doc_count
+     FROM tags t WHERE t.case_id=$1
+     ORDER BY t.name`, [caseId]
+  )).rows;
+
+  // Status summary: explicit review statuses (excluding any stored 'unreviewed'),
+  // then compute Unreviewed = total - documents that have a real review status.
+  // This is correct whether or not the data stores explicit 'unreviewed' rows.
+  const rawStatuses = (await query<any>(
+    `SELECT status, count(DISTINCT document_id)::int AS n
+     FROM review_states WHERE case_id=$1 AND status <> 'unreviewed'
+     GROUP BY status`, [caseId]
+  )).rows as { status: string; n: number }[];
+  const reviewedTotal = rawStatuses.reduce((s, r) => s + r.n, 0);
+  const STATUS_LABELS: Record<string, string> = {
+    unreviewed: 'Unreviewed', in_review: 'In review', responsive: 'Responsive',
+    non_responsive: 'Non-responsive', privileged: 'Privileged', further_review: 'Further review',
+  };
+  // Canonical display order; unknown statuses appended afterwards.
+  const ORDER = ['unreviewed', 'in_review', 'responsive', 'non_responsive', 'privileged', 'further_review'];
+  const byStatus = new Map(rawStatuses.map((r) => [r.status, r.n]));
+  const statusSummary: { status: string; label: string; count: number }[] = [];
+  const unreviewed = Math.max(0, totalDocuments - reviewedTotal);
+  byStatus.set('unreviewed', unreviewed);
+  for (const s of ORDER) {
+    if (s === 'unreviewed' || byStatus.has(s)) {
+      statusSummary.push({ status: s, label: STATUS_LABELS[s] || s, count: byStatus.get(s) || 0 });
+    }
+  }
+  for (const [s, n] of byStatus) {
+    if (!ORDER.includes(s)) statusSummary.push({ status: s, label: STATUS_LABELS[s] || s, count: n });
+  }
+
+  await audit({ userId: req.user!.id, caseId, action: 'eca_view', target: `case:${caseId}` });
+
+  res.json({
+    case: {
+      id: caseRow.id, name: caseRow.name, case_number: caseRow.case_number,
+      description: caseRow.description, status: caseRow.status, created_at: caseRow.created_at,
+    },
+    role: (req as any).caseRole,
+    metrics: {
+      total_documents: totalDocuments,
+      email_count: totals.email_count,
+      custodian_count: totals.custodian_count,
+    },
+    custodians,
+    doctypes,
+    tag_summary: tagSummary,
+    status_summary: statusSummary,
+  });
+});
+
 // Edit a case's editable metadata (name + case_number/description/status).
 // Permission: system_admin (global) OR case_manager on that case.
 // requireCaseRole('case_manager') allows exactly those two and rejects

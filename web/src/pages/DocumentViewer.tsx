@@ -94,7 +94,7 @@ export default function DocumentViewer() {
       {/* top bar */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
-          <Link to={`/cases/${caseId}`} className="btn-ghost text-slate-500"><ChevronLeft size={16} /> Back to case</Link>
+          <Link to={`/cases/${caseId}/review`} className="btn-ghost text-slate-500"><ChevronLeft size={16} /> Back to list</Link>
           <div>
             <div className="flex items-center gap-2">
               {isPdf ? <FileType2 size={18} className="text-rose-500" /> : <FileText size={18} className="text-sky-600" />}

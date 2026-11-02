@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDate, reviewMeta, REVIEW_STATES } from '../lib/format';
 import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks } from 'lucide-react';
@@ -21,7 +21,8 @@ export default function CaseWorkspace() {
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [showAdmin, setShowAdmin] = useState(false);
+  const [searchParams] = useSearchParams();
+  const [showAdmin, setShowAdmin] = useState(searchParams.get('settings') === '1');
 
   // search mode: 'fulltext' (default, tsvector) or 'pattern' (GREP/regex)
   const [mode, setMode] = useState<'fulltext' | 'pattern'>('fulltext');
@@ -31,10 +32,11 @@ export default function CaseWorkspace() {
   const [showKeywords, setShowKeywords] = useState(false);
   const [searchError, setSearchError] = useState('');
 
-  // filters
+  // filters — initialise status/tag from the URL so ECA home links can
+  // pre-filter the review list (e.g. /cases/1/review?status=responsive).
   const [q, setQ] = useState('');
-  const [status, setStatus] = useState('');
-  const [tagId, setTagId] = useState('');
+  const [status, setStatus] = useState(searchParams.get('status') || '');
+  const [tagId, setTagId] = useState(searchParams.get('tagId') || '');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [bookmarked, setBookmarked] = useState(false);
@@ -98,7 +100,7 @@ export default function CaseWorkspace() {
       {/* header */}
       <div className="flex items-start justify-between gap-4 mb-5">
         <div>
-          <Link to="/" className="text-sm text-slate-400 hover:text-slate-600 flex items-center gap-1"><ChevronLeft size={14} /> All cases</Link>
+          <Link to={`/cases/${caseId}`} className="text-sm text-slate-400 hover:text-slate-600 flex items-center gap-1"><ChevronLeft size={14} /> Case overview</Link>
           <h1 className="text-2xl font-bold text-navy-900 mt-1">{info?.name || 'Loading…'}</h1>
           <p className="text-sm text-slate-500">{info?.case_number} · {total} documents · your role: <span className="font-medium text-slate-700">{(info?.role || '').replace('_', ' ')}</span></p>
         </div>

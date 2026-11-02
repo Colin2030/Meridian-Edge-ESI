@@ -274,7 +274,7 @@ export default function AddCaseData() {
               <p className="text-slate-600 mt-1">Imported <strong>{job.doc_count}</strong> document(s) / <strong>{job.page_count}</strong> page(s) into <strong>{info?.name}</strong>.</p>
               {job.error && <p className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 inline-block"><AlertTriangle size={13} className="inline mr-1" />{job.error}</p>}
               <div className="mt-5 flex items-center justify-center gap-2">
-                <button className="btn-primary" onClick={() => nav(`/cases/${caseId}`)}>Review documents <ArrowRight size={16} /></button>
+                <button className="btn-primary" onClick={() => nav(`/cases/${caseId}/review`)}>Review documents <ArrowRight size={16} /></button>
                 <button className="btn-outline" onClick={() => { setJob(null); setFiles([]); }}>Import another</button>
               </div>
             </div>
