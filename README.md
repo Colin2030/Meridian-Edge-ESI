@@ -31,11 +31,12 @@ external runtime dependencies**.
 6. [Demo credentials](#demo-credentials)
 7. [Roles & permissions (RBAC)](#roles--permissions-rbac)
 8. [Loadfile formats supported](#loadfile-formats-supported)
-9. [Importing your own data](#importing-your-own-data)
-10. [Air-gap / secure-network deployment](#air-gap--secure-network-deployment)
-11. [Deploy templates](#deploy-templates)
-12. [Security notes](#security-notes)
-13. [PoC scope vs. production roadmap](#poc-scope-vs-production-roadmap)
+9. [Importing your own data (CLI)](#importing-your-own-data)
+10. [In-app "Add Case Data" import](#in-app-add-case-data-import)
+11. [Air-gap / secure-network deployment](#air-gap--secure-network-deployment)
+12. [Deploy templates](#deploy-templates)
+13. [Security notes](#security-notes)
+14. [PoC scope vs. production roadmap](#poc-scope-vs-production-roadmap)
 
 ---
 
@@ -44,6 +45,10 @@ external runtime dependencies**.
 - **Case-based workspaces** with per-case role-based access control.
 - **Concordance loadfile ingestion** — `.DAT` (metadata) + `.OPT` (image cross-reference), with
   native **multi-page TIFF** and **PDF** images.
+- **In-app "Add Case Data" import** — system admins and case managers can import a loadfile
+  deliverable straight from the browser (drag-and-drop a single `.zip`, or pick the `.DAT`/`.OPT` +
+  TIFF/PDF files), with a live progress view, an import-history list and plain-English errors. Uses
+  the same ingest pipeline as the CLI. See [In-app "Add Case Data" import](#in-app-add-case-data-import).
 - **Full-text search** over document body text and metadata (PostgreSQL `tsvector`, GIN-indexed),
   plus metadata/review-state filtering.
 - **Document viewer** — page-by-page image rendering, PDF rendering via a **locally bundled**
@@ -51,8 +56,9 @@ external runtime dependencies**.
 - **Review workflow** — per-document review states (unreviewed / responsive / not-responsive /
   privileged / needs-further-review), bookmarks, tags, folders and threaded comments.
 - **Audit logging** of significant actions (login, review changes, imports, admin changes).
-- **Elegant, calm, non-technical-friendly UI** (navy/slate with a gold accent), Meridian Edge
-  branding throughout.
+- **Elegant, calm, non-technical-friendly UI** in the official **monochrome charcoal** Meridian
+  Edge identity (charcoal `#202020` / white, with a restrained steel-blue accent), using the
+  official logo marks and a locally-bundled favicon — all assets self-hosted (no hotlinking).
 - **Air-gap-ready** — zero external runtime network calls; all fonts, JS and the pdf.js worker are
   self-hosted.
 
@@ -97,12 +103,14 @@ minimal — one process, one port, one reverse-proxy rule — and removes any cr
 | Auth & middleware | `lib/auth.ts`, `middleware/auth.ts` |
 | Loadfile parsing & ingest | `lib/loadfile.ts`, `lib/ingest.ts` |
 | Audit | `lib/audit.ts` |
-| Routes | `routes/auth.ts`, `routes/cases.ts`, `routes/documents.ts`, `routes/admin.ts`, `routes/files.ts` |
+| Routes | `routes/auth.ts`, `routes/cases.ts`, `routes/documents.ts`, `routes/admin.ts`, `routes/files.ts`, `routes/imports.ts` (in-app upload) |
 
 **Scripts (`scripts/`):** `migrate.ts`, `seed.ts`, `import.ts` (CLI importer), `gen_samples.ts` +
 `sample_content.ts` + `pdf_render.py` (synthetic demo-data generator).
 
-**Migrations (`migrations/`):** `001_init.sql` — full schema.
+**Migrations (`migrations/`):** `001_init.sql` — full schema; `002_imports.sql` — extra
+`loadfile_imports` columns (progress phase, doc/page counters, source kind, warnings) for the
+in-app importer (idempotent `ADD COLUMN IF NOT EXISTS`).
 
 ---
 
@@ -259,7 +267,7 @@ IMAGEKEY,VOLUME,PATH\IMAGEFILE,DOCBREAK(Y/empty),,,PAGECOUNT
 
 ---
 
-## Importing your own data
+## Importing your own data (CLI)
 
 ```bash
 npm run import -- \
@@ -273,6 +281,69 @@ npm run import -- \
 The importer parses the loadfile, renders/links pages, (optionally) OCRs them, inserts documents
 + pages + initial review states, builds the search index, and records a row in `loadfile_imports`
 and the audit log. The exact same pipeline is used by `npm run seed`.
+
+---
+
+## In-app "Add Case Data" import
+
+Non-technical case teams don't need the CLI: a **system admin** or **case manager** can import a
+loadfile deliverable straight from the browser.
+
+**Where:** the **"Add case data"** button on a case workspace (visible only to admins/managers), or
+the route `/cases/:caseId/import`. The page is hidden for reviewers/read-only users, **and the API
+enforces the same rule** (see below) so UI hiding is never the only guard.
+
+**What you upload — two clearly-labelled options:**
+
+1. **A single `.zip`** containing the whole loadfile folder (the `.DAT`, the `.OPT` and the TIFF/PDF
+   images, in any sub-folder layout). Drag-and-drop it onto the drop zone.
+2. **Individual files** — pick the `.DAT`, the `.OPT` and the TIFF/PDF images with the file picker.
+
+The page detects and labels which file looks like the `.DAT` and which the `.OPT`, lists every
+selected file with its size, and lets you remove items before submitting. A short plain-English
+explainer describes what a loadfile is, with the precise format on a secondary line.
+
+**What happens on submit:**
+
+1. The files upload with a **progress bar**.
+2. The server stages them in a private per-case / per-import directory (never web-served), unzips a
+   `.zip` if provided, locates the `.DAT` + `.OPT`, flattens the referenced TIFF/PDF images, and
+   starts a **background import job**.
+3. The page switches to a **live progress view** that polls a status endpoint
+   (`pending → parsing → rendering pages X/Y → completed`), ending with a success summary
+   ("Imported N documents / M pages") and a **link to review them** — or a clear, specific error.
+4. Any image files referenced by the loadfile but missing from the upload are reported as a plain
+   warning ("Completed with 3 missing image reference(s): …"); the import still completes for the
+   documents whose images were present.
+
+An **Import history** table on the page lists previous imports for the case (date, who, name,
+doc/page counts, status) so managers can see exactly what has been loaded.
+
+### API surface (`routes/imports.ts`, mounted under `/api/cases`)
+
+| Method & path | Who | Purpose |
+|---|---|---|
+| `POST /api/cases/:caseId/imports` | `case_manager`+ (admin/manager) | Multipart upload (`files`: the `.zip` **or** the `.DAT`/`.OPT`/images). Stages, validates (≥1 `.DAT` required, else `400 "No .DAT loadfile found in the upload"`), creates the `loadfile_imports` row, audits `import.started`, kicks the background job, returns `202 { importId, status, datFile, optFile, imageCount }`. |
+| `GET /api/cases/:caseId/imports/:importId` | case member | Live status for the progress view (phase, docs/pages done, warnings/error). |
+| `GET /api/cases/:caseId/imports` | case member | Import history for the case. |
+
+The write endpoint uses `requireCaseRole('case_manager')`, so **reviewers and read-only users
+receive HTTP 403** (verified). The background job reuses `src/lib/ingest.ts` end-to-end — the in-app
+path and the CLI path produce identical results.
+
+> **Still view-only.** This feature imports **already-processed** loadfile deliverables for
+> *viewing/review*. It does **not** process, de-duplicate or forensically acquire raw evidence —
+> that remains an upstream responsibility.
+
+**Notes & limits**
+
+- Upload limits (set in both the nginx vhost and multer): **512 MB** per request, up to 2000 files.
+  Keep `client_max_body_size` in `deploy/` in step with multer's `fileSize` if you change them.
+- The background job runs **in-process** (single Node process) — fine for the PoC's import sizes; a
+  dedicated job queue is on the production roadmap for very large deliverables.
+- Images are matched to `.OPT` references by **basename**, so nested zip folder layouts are handled.
+- Staged upload files are retained under `uploads/imports/<caseId>/<importId>/` as a record (not
+  web-served; reachable only through the access-controlled file gate).
 
 ---
 
@@ -336,7 +407,9 @@ Each file's header comments contain the exact install commands.
 
 **In this PoC / UAT build**
 
-- Full Concordance `.DAT` + `.OPT` loadfile ingest with multi-page TIFF and PDF images.
+- Full Concordance `.DAT` + `.OPT` loadfile ingest with multi-page TIFF and PDF images, via the
+  CLI **and** the in-browser "Add Case Data" importer (zip or individual files, live progress,
+  import history) for admins/managers.
 - Case workspaces, per-case RBAC (4 roles), server-side enforcement, case isolation.
 - Full-text + metadata search, document viewer with local pdf.js, review states, bookmarks, tags,
   folders, comments.

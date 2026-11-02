@@ -12,7 +12,7 @@ export function CaseAdminPanel({ caseId, tags, onClose, onChange }: { caseId: nu
   const [members, setMembers] = useState<Member[]>([]);
   const [allUsers, setAllUsers] = useState<SysUser[]>([]);
   const [audit, setAudit] = useState<any[]>([]);
-  const [newTag, setNewTag] = useState(''); const [newColour, setNewColour] = useState('#b08d57');
+  const [newTag, setNewTag] = useState(''); const [newColour, setNewColour] = useState('#3b6ea5');
   const [addUser, setAddUser] = useState(''); const [addRole, setAddRole] = useState('reviewer');
   const [err, setErr] = useState('');
 

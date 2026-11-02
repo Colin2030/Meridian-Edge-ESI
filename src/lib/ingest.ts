@@ -14,6 +14,10 @@ export interface ImportOptions {
   setName?: string;
   ocr?: boolean;
   log?: (msg: string) => void;
+  /** Reuse an already-created loadfile_imports row (e.g. created by the upload route) instead of inserting a new one. */
+  setId?: number;
+  /** Live progress callback for the background job runner / status endpoint. */
+  onProgress?: (p: { phase: 'parsing' | 'rendering'; docsDone: number; docsTotal: number; pagesDone: number }) => void;
 }
 
 export interface ImportResult {
@@ -89,10 +93,12 @@ function ocrImage(imgPath: string): string {
 
 export async function runImport(opts: ImportOptions): Promise<ImportResult> {
   const log = opts.log || (() => {});
+  const progress = opts.onProgress || (() => {});
   const datContent = fs.readFileSync(opts.datPath, 'utf8');
   const dat = parseDat(datContent);
   const fieldMap = buildFieldMap(dat.fields);
   log(`Parsed .DAT: ${dat.rows.length} records, delimiter=${dat.delimiterSet.kind}, control field=${fieldMap.control_number}`);
+  progress({ phase: 'parsing', docsDone: 0, docsTotal: dat.rows.length, pagesDone: 0 });
 
   let optDocs: OptDocument[] = [];
   if (opts.optPath && fs.existsSync(opts.optPath)) {
@@ -109,13 +115,23 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
   fs.mkdirSync(renderedRoot, { recursive: true });
   fs.mkdirSync(nativeRoot, { recursive: true });
 
-  // Create import set row
-  const setRow = await query<{ id: number }>(
-    `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, doc_count, status)
-     VALUES ($1,$2,$3,$4,$5,0,'processing') RETURNING id`,
-    [opts.caseId, opts.setName || path.basename(opts.datPath), path.basename(opts.datPath), opts.optPath ? path.basename(opts.optPath) : null, opts.importedBy ?? null]
-  );
-  const setId = setRow.rows[0].id;
+  // Create import set row (or reuse one already created by the upload route).
+  let setId: number;
+  if (opts.setId) {
+    setId = opts.setId;
+    await query(
+      `UPDATE loadfile_imports SET status='processing', phase='rendering', docs_total=$2 WHERE id=$1`,
+      [setId, dat.rows.length]
+    );
+  } else {
+    const setRow = await query<{ id: number }>(
+      `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, doc_count, status, phase, docs_total)
+       VALUES ($1,$2,$3,$4,$5,0,'processing','rendering',$6) RETURNING id`,
+      [opts.caseId, opts.setName || path.basename(opts.datPath), path.basename(opts.datPath), opts.optPath ? path.basename(opts.optPath) : null, opts.importedBy ?? null, dat.rows.length]
+    );
+    setId = setRow.rows[0].id;
+  }
+  progress({ phase: 'rendering', docsDone: 0, docsTotal: dat.rows.length, pagesDone: 0 });
 
   let totalPages = 0;
   let docCount = 0;
@@ -225,9 +241,12 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
 
     totalPages += pageImagePaths.length;
     docCount++;
+    progress({ phase: 'rendering', docsDone: docCount, docsTotal: dat.rows.length, pagesDone: totalPages });
+    // Persist incremental progress so the status endpoint reflects it live.
+    await query(`UPDATE loadfile_imports SET docs_done=$2, pages_done=$3 WHERE id=$1`, [setId, docCount, totalPages]);
   }
 
-  await query(`UPDATE loadfile_imports SET doc_count=$2, status='completed' WHERE id=$1`, [setId, docCount]);
+  await query(`UPDATE loadfile_imports SET doc_count=$2, page_count=$3, docs_done=$2, pages_done=$3, status='completed', phase='completed' WHERE id=$1`, [setId, docCount, totalPages]);
   log(`Import complete: ${docCount} documents, ${totalPages} pages`);
   return { setId, docCount, pageCount: totalPages };
 }

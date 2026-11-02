@@ -26,7 +26,7 @@ export default function Login() {
     <div className="min-h-screen grid lg:grid-cols-2">
       {/* Brand panel */}
       <div className="hidden lg:flex flex-col justify-between bg-navy-900 p-12 text-white relative overflow-hidden">
-        <div className="absolute inset-0 opacity-[0.06]" style={{ backgroundImage: 'radial-gradient(circle at 20% 20%, #b08d57 0, transparent 40%), radial-gradient(circle at 80% 70%, #1d335c 0, transparent 45%)' }} />
+        <div className="absolute inset-0 opacity-[0.08]" style={{ backgroundImage: 'radial-gradient(circle at 20% 20%, #3b6ea5 0, transparent 42%), radial-gradient(circle at 80% 70%, #4d4d4d 0, transparent 45%)' }} />
         <div className="relative"><Wordmark light /></div>
         <div className="relative max-w-md">
           <h1 className="text-3xl font-bold leading-tight">Review electronically stored information with clarity and control.</h1>

@@ -10,6 +10,7 @@ import caseRoutes from './routes/cases';
 import docRoutes from './routes/documents';
 import adminRoutes from './routes/admin';
 import fileRoutes from './routes/files';
+import importRoutes from './routes/imports';
 
 const app = express();
 app.set('trust proxy', true);
@@ -46,6 +47,7 @@ app.use((req, _res, next) => {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'meridian-edge' }));
 app.use('/api/auth', authRoutes);
+app.use('/api/cases', importRoutes);
 app.use('/api/cases', caseRoutes);
 app.use('/api', docRoutes);
 app.use('/api/admin', adminRoutes);

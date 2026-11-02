@@ -1,24 +1,53 @@
+import iconCharcoal from '../assets/brand/meridian-icon.png';
+import iconWhite from '../assets/brand/meridian-icon-white.png';
+import lockupInverted from '../assets/brand/meridian-logo-horizontal-inverted.png';
+
+// Icon mark only. On dark/charcoal surfaces pass `light` for the white icon;
+// on light surfaces the charcoal icon is used as-is.
 export function Logo({ size = 32, light = false }: { size?: number; light?: boolean }) {
-  const mark = light ? '#c9a876' : '#b08d57';
-  const body = light ? '#ffffff' : '#0f1b33';
+  const src = light ? iconWhite : iconCharcoal;
   return (
-    <svg width={size} height={size} viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
-      <rect x="3" y="3" width="42" height="42" rx="9" fill={body} />
-      <path d="M12 33V15h4.4l7.6 11 7.6-11H36v18h-4.3V22.3L24.4 33h-0.8L16.3 22.3V33H12z" fill={mark} />
-      <path d="M24 6l2.1 4.3 4.7.7-3.4 3.3.8 4.7-4.2-2.2-4.2 2.2.8-4.7-3.4-3.3 4.7-.7L24 6z" fill={mark} opacity="0" />
-    </svg>
+    <img
+      src={src}
+      alt="Meridian Edge"
+      width={size}
+      height={size}
+      className="object-contain select-none"
+      style={{ width: size, height: size }}
+      draggable={false}
+    />
   );
 }
 
-export function Wordmark({ light = false }: { light?: boolean }) {
+// Full brand lockup with the "ESI Review Platform" descriptor sub-label.
+// On dark surfaces the official white-on-charcoal horizontal lockup image is used
+// (so the "Meridian Edge" wordmark is NOT duplicated as text). On light surfaces
+// we compose the charcoal icon with the wordmark text (no light lockup asset exists).
+export function Wordmark({ light = false, height = 30 }: { light?: boolean; height?: number }) {
+  if (light) {
+    return (
+      <div className="select-none">
+        <img
+          src={lockupInverted}
+          alt="Meridian Edge"
+          style={{ height, width: 'auto' }}
+          className="object-contain"
+          draggable={false}
+        />
+        <div className="mt-1 pl-0.5 text-[9px] font-medium uppercase tracking-[0.22em] text-slate-400">
+          ESI Review Platform
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-2.5 select-none">
-      <Logo size={30} light={light} />
+      <Logo size={height} />
       <div className="leading-none">
-        <div className={`text-[15px] font-bold tracking-tight ${light ? 'text-white' : 'text-navy-900'}`}>
-          Meridian <span className="text-accent">Edge</span>
+        <div className="text-[15px] font-bold tracking-tight text-navy-900">
+          Meridian Edge
         </div>
-        <div className={`text-[9px] font-medium uppercase tracking-[0.18em] ${light ? 'text-slate-300' : 'text-slate-400'}`}>
+        <div className="mt-1 text-[9px] font-medium uppercase tracking-[0.18em] text-slate-400">
           ESI Review Platform
         </div>
       </div>

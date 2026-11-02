@@ -5,6 +5,7 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import CaseWorkspace from './pages/CaseWorkspace';
 import DocumentViewer from './pages/DocumentViewer';
+import AddCaseData from './pages/AddCaseData';
 import Admin from './pages/Admin';
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -21,6 +22,7 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
       <Route path="/cases/:caseId" element={<Protected><CaseWorkspace /></Protected>} />
+      <Route path="/cases/:caseId/import" element={<Protected><AddCaseData /></Protected>} />
       <Route path="/cases/:caseId/documents/:docId" element={<Protected><DocumentViewer /></Protected>} />
       <Route path="/admin" element={<Protected><Admin /></Protected>} />
       <Route path="*" element={<Navigate to="/" replace />} />
