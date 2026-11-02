@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { fmtDate } from '../lib/format';
-import { Users, FolderPlus, Plus, ShieldCheck, UserCog } from 'lucide-react';
+import { Users, FolderPlus, Plus, ShieldCheck, UserCog, Pencil, Trash2, X, AlertTriangle } from 'lucide-react';
 
 interface SysUser { id: number; username: string; email: string; display_name: string; is_system_admin: boolean; active: boolean; created_at: string; }
-interface CaseRow { id: number; name: string; case_number: string; }
+interface CaseRow { id: number; name: string; case_number: string | null; description: string | null; status: string; }
 
 export default function Admin() {
   const [tab, setTab] = useState<'users' | 'cases'>('users');
@@ -17,6 +16,9 @@ export default function Admin() {
   const [nu, setNu] = useState({ username: '', password: '', displayName: '', email: '', isSystemAdmin: false });
   // new case form
   const [nc, setNc] = useState({ name: '', caseNumber: '', description: '' });
+  // edit / delete modal targets
+  const [editing, setEditing] = useState<CaseRow | null>(null);
+  const [deleting, setDeleting] = useState<CaseRow | null>(null);
 
   const loadUsers = () => api.get<SysUser[]>('/api/admin/users').then(setUsers);
   const loadCases = () => api.get<CaseRow[]>('/api/cases').then(setCases);
@@ -88,12 +90,23 @@ export default function Admin() {
         <div className="grid lg:grid-cols-[1fr_340px] gap-6">
           <div className="card overflow-hidden">
             <table className="w-full text-sm">
-              <thead><tr className="bg-slate-50 text-left text-xs uppercase text-slate-500"><th className="px-4 py-3">Case</th><th>Reference</th><th></th></tr></thead>
+              <thead><tr className="bg-slate-50 text-left text-xs uppercase text-slate-500"><th className="px-4 py-3">Case</th><th>Reference</th><th>Status</th><th className="text-right pr-4">Actions</th></tr></thead>
               <tbody className="divide-y divide-slate-100">
                 {cases.map((c) => (
-                  <tr key={c.id}><td className="px-4 py-3 font-medium text-navy-900">{c.name}</td><td className="text-slate-500">{c.case_number || '—'}</td>
-                    <td className="text-right pr-4"><a href={`/cases/${c.id}`} className="btn-ghost text-xs text-accent-dark">Open →</a></td></tr>
+                  <tr key={c.id}>
+                    <td className="px-4 py-3 font-medium text-navy-900">{c.name}</td>
+                    <td className="text-slate-500">{c.case_number || '—'}</td>
+                    <td><span className="badge bg-slate-100 text-slate-600 capitalize">{c.status || 'open'}</span></td>
+                    <td className="pr-4">
+                      <div className="flex items-center justify-end gap-1">
+                        <button onClick={() => { setEditing(c); setErr(''); setMsg(''); }} className="btn-ghost text-xs text-slate-600" title="Edit case"><Pencil size={14} /> Edit</button>
+                        <a href={`/cases/${c.id}`} className="btn-ghost text-xs text-accent-dark">Open →</a>
+                        <button onClick={() => { setDeleting(c); setErr(''); setMsg(''); }} className="btn-ghost text-xs text-rose-500 hover:bg-rose-50" title="Delete case"><Trash2 size={14} /></button>
+                      </div>
+                    </td>
+                  </tr>
                 ))}
+                {cases.length === 0 && <tr><td colSpan={4} className="py-6 text-center text-slate-400">No cases yet.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -108,6 +121,138 @@ export default function Admin() {
           </form>
         </div>
       )}
+
+      {editing && (
+        <EditCaseModal
+          row={editing}
+          onClose={() => setEditing(null)}
+          onSaved={(updated) => {
+            setCases((cs) => cs.map((c) => (c.id === updated.id ? { ...c, ...updated } : c)));
+            setEditing(null);
+            setMsg(`Case "${updated.name}" updated.`);
+          }}
+        />
+      )}
+
+      {deleting && (
+        <DeleteCaseModal
+          row={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={(id, name) => {
+            setCases((cs) => cs.filter((c) => c.id !== id));
+            setDeleting(null);
+            setMsg(`Case "${name}" and all its data were permanently deleted.`);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---- Edit case modal -------------------------------------------------------
+function EditCaseModal({ row, onClose, onSaved }: { row: CaseRow; onClose: () => void; onSaved: (c: CaseRow) => void }) {
+  const [name, setName] = useState(row.name);
+  const [caseNumber, setCaseNumber] = useState(row.case_number || '');
+  const [description, setDescription] = useState(row.description || '');
+  const [status, setStatus] = useState(row.status || 'open');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) { setErr('Case name cannot be empty.'); return; }
+    setBusy(true); setErr('');
+    try {
+      const updated = await api.put<CaseRow>(`/api/cases/${row.id}`, {
+        name: name.trim(), caseNumber: caseNumber.trim(), description, status,
+      });
+      onSaved(updated);
+    } catch (e: any) { setErr(e.message || 'Failed to save'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Modal onClose={onClose}>
+      <form onSubmit={save}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold text-navy-900 flex items-center gap-2"><Pencil size={18} className="text-accent" /> Edit case</h3>
+          <button type="button" onClick={onClose} className="btn-ghost"><X size={16} /></button>
+        </div>
+        <div className="space-y-3">
+          <div><label className="label">Case name</label><input className="input" value={name} onChange={(e) => setName(e.target.value)} autoFocus /></div>
+          <div><label className="label">Reference / number</label><input className="input" value={caseNumber} onChange={(e) => setCaseNumber(e.target.value)} /></div>
+          <div><label className="label">Description</label><textarea className="input" rows={3} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
+          <div><label className="label">Status</label>
+            <select className="input" value={status} onChange={(e) => setStatus(e.target.value)}>
+              <option value="open">Open</option>
+              <option value="closed">Closed</option>
+              <option value="archived">Archived</option>
+            </select>
+          </div>
+          {err && <div className="rounded-md bg-rose-50 border border-rose-200 px-3 py-2 text-sm text-rose-700">{err}</div>}
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn-outline">Cancel</button>
+          <button type="submit" className="btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ---- Delete case modal (friction-ful: type the name to confirm) ------------
+function DeleteCaseModal({ row, onClose, onDeleted }: { row: CaseRow; onClose: () => void; onDeleted: (id: number, name: string) => void }) {
+  const [confirmText, setConfirmText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const matches = confirmText.trim() === row.name.trim();
+
+  const del = async () => {
+    if (!matches) return;
+    setBusy(true); setErr('');
+    try {
+      await api.del(`/api/admin/cases/${row.id}`);
+      onDeleted(row.id, row.name);
+    } catch (e: any) { setErr(e.message || 'Failed to delete'); setBusy(false); }
+  };
+
+  return (
+    <Modal onClose={onClose}>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-bold text-rose-700 flex items-center gap-2"><AlertTriangle size={18} /> Delete case</h3>
+        <button type="button" onClick={onClose} className="btn-ghost"><X size={16} /></button>
+      </div>
+      <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-3 text-sm text-rose-800">
+        <p className="font-semibold">This permanently removes the entire case.</p>
+        <p className="mt-1">All of its <strong>documents, page images, review states, bookmarks, tags, folders, comments, memberships and import history</strong> will be deleted. This action cannot be undone.</p>
+      </div>
+      <div className="mt-4">
+        <label className="label">Type the case name <span className="font-bold text-navy-900">{row.name}</span> to confirm</label>
+        <input className="input" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder={row.name} autoFocus autoComplete="off" />
+      </div>
+      {err && <div className="mt-3 rounded-md bg-rose-50 border border-rose-200 px-3 py-2 text-sm text-rose-700">{err}</div>}
+      <div className="mt-5 flex justify-end gap-2">
+        <button type="button" onClick={onClose} className="btn-outline">Cancel</button>
+        <button
+          type="button"
+          onClick={del}
+          disabled={!matches || busy}
+          className="btn bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Trash2 size={15} /> {busy ? 'Deleting…' : 'Permanently delete'}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---- Small modal shell -----------------------------------------------------
+function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal-950/60 p-4" onClick={onClose}>
+      <div className="w-full max-w-md card p-6" onClick={(e) => e.stopPropagation()}>
+        {children}
+      </div>
     </div>
   );
 }

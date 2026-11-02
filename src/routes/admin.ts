@@ -1,5 +1,8 @@
 import { Router } from 'express';
-import { query } from '../db';
+import fs from 'fs';
+import path from 'path';
+import { query, withTx } from '../db';
+import { config } from '../config';
 import { hashPassword } from '../lib/auth';
 import { audit } from '../lib/audit';
 import { AuthedRequest, requireAuth, requireSystemAdmin } from '../middleware/auth';
@@ -73,6 +76,56 @@ router.put('/cases/:id', requireAuth, requireSystemAdmin, async (req: AuthedRequ
   );
   await audit({ userId: req.user!.id, caseId: id, action: 'case_updated', target: `case:${id}` });
   res.json({ ok: true });
+});
+
+// Delete a case and ALL of its data. DESTRUCTIVE — system_admin ONLY.
+// A case_manager must NOT be able to delete a case, so this lives on the
+// admin router behind requireSystemAdmin (not requireCaseRole).
+router.delete('/cases/:id', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id || Number.isNaN(id)) return res.status(400).json({ error: 'Invalid case id' });
+
+  const c = (await query<any>(`SELECT id, name, case_number FROM cases WHERE id=$1`, [id])).rows[0];
+  if (!c) return res.status(404).json({ error: 'Case not found' });
+  const docCount = (await query<any>(`SELECT count(*)::int AS n FROM documents WHERE case_id=$1`, [id])).rows[0].n;
+
+  // Write the audit row FIRST, while the case still exists (so the case_id FK is
+  // valid). The DB cascade will then set audit_log.case_id to NULL for this row
+  // (ON DELETE SET NULL), but the case identity is preserved in target/detail so
+  // the deletion is permanently recorded.
+  await audit({
+    userId: req.user!.id,
+    caseId: id,
+    action: 'case.deleted',
+    target: `case:${id}`,
+    detail: `Deleted case "${c.name}"${c.case_number ? ` (${c.case_number})` : ''} with ${docCount} document(s) and all review work`,
+  });
+
+  // DB cleanup in a single transaction. Every dependent table references
+  // cases(id) or documents(id) with ON DELETE CASCADE, so deleting the case row
+  // removes: case_memberships, loadfile_imports, documents -> (document_pages,
+  // review_states, bookmarks, document_tags, document_folders, comments),
+  // review_states, bookmarks, tags (+ nested subtree + their document_tags),
+  // folders (+ document_folders), comments. audit_log.case_id is SET NULL.
+  await withTx(async (q) => {
+    await q(`DELETE FROM cases WHERE id=$1`, [id]);
+  });
+
+  // On-disk cleanup: rendered/native page images and any staged import files.
+  for (const dir of [path.join(config.uploadsDir, `case-${id}`), path.join(config.uploadsDir, 'imports', String(id))]) {
+    try {
+      // Guard against path escaping the uploads root.
+      const abs = path.resolve(dir);
+      if (abs.startsWith(path.resolve(config.uploadsDir) + path.sep)) {
+        fs.rmSync(abs, { recursive: true, force: true });
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`case delete: failed to remove ${dir}`, e);
+    }
+  }
+
+  res.json({ ok: true, deleted: { id, name: c.name, documents: docCount } });
 });
 
 export default router;

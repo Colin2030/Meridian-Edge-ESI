@@ -44,6 +44,57 @@ router.get('/:caseId', requireAuth, requireCaseRole('read_only'), async (req: Au
   res.json({ ...rows[0], role: (req as any).caseRole, tags, folders, statusCounts });
 });
 
+// Edit a case's editable metadata (name + case_number/description/status).
+// Permission: system_admin (global) OR case_manager on that case.
+// requireCaseRole('case_manager') allows exactly those two and rejects
+// reviewer / read_only with 403.
+router.put('/:caseId', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
+  const caseId = (req as any).caseId;
+  const body = req.body || {};
+
+  // Load current values so we can validate and audit old -> new.
+  const cur = (await query<any>(`SELECT name, case_number, description, status FROM cases WHERE id=$1`, [caseId])).rows[0];
+  if (!cur) return res.status(404).json({ error: 'Case not found' });
+
+  // Build the new values. A field is only changed when present in the body.
+  const next: any = { ...cur };
+
+  if (body.name !== undefined) {
+    const name = String(body.name).trim();
+    if (!name) return res.status(400).json({ error: 'Case name cannot be empty' });
+    next.name = name;
+  }
+  if (body.caseNumber !== undefined) next.case_number = body.caseNumber === null ? null : String(body.caseNumber).trim() || null;
+  if (body.description !== undefined) next.description = body.description === null ? null : String(body.description);
+  if (body.status !== undefined) {
+    const status = String(body.status).trim();
+    const allowed = ['open', 'closed', 'archived'];
+    if (status && !allowed.includes(status)) return res.status(400).json({ error: `status must be one of ${allowed.join(', ')}` });
+    if (status) next.status = status;
+  }
+
+  await query(
+    `UPDATE cases SET name=$1, case_number=$2, description=$3, status=$4 WHERE id=$5`,
+    [next.name, next.case_number, next.description, next.status, caseId]
+  );
+
+  // Audit only the fields that actually changed, as "field: old -> new".
+  const changes: string[] = [];
+  for (const [k, label] of [['name', 'name'], ['case_number', 'case_number'], ['description', 'description'], ['status', 'status']] as const) {
+    if ((cur[k] ?? null) !== (next[k] ?? null)) changes.push(`${label}: "${cur[k] ?? ''}" -> "${next[k] ?? ''}"`);
+  }
+  await audit({
+    userId: req.user!.id,
+    caseId,
+    action: 'case.updated',
+    target: `case:${caseId}`,
+    detail: changes.length ? changes.join('; ') : 'no changes',
+  });
+
+  const updated = (await query<any>(`SELECT * FROM cases WHERE id=$1`, [caseId])).rows[0];
+  res.json(updated);
+});
+
 // Members of a case (manager+)
 router.get('/:caseId/members', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
   const caseId = (req as any).caseId;
@@ -76,17 +127,120 @@ router.delete('/:caseId/members/:userId', requireAuth, requireCaseRole('case_man
   res.json({ ok: true });
 });
 
-// Tags
+// ---- Tags (hierarchical / nested) ------------------------------------------
+
+// List a case's tags as a flat list (with parent_id). Any case member may read
+// tags (needed for tagging & filtering); the frontend builds the tree.
+router.get('/:caseId/tags', requireAuth, requireCaseRole('read_only'), async (req: AuthedRequest, res) => {
+  const caseId = (req as any).caseId;
+  const { rows } = await query<any>(
+    `SELECT id, case_id, name, colour, parent_id FROM tags WHERE case_id=$1 ORDER BY name`, [caseId]
+  );
+  res.json(rows);
+});
+
+// Create a tag, optionally nested under a parent tag (same case).
 router.post('/:caseId/tags', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
   const caseId = (req as any).caseId;
   const { name, colour } = req.body || {};
-  if (!name) return res.status(400).json({ error: 'name required' });
-  const { rows } = await query<any>(
-    `INSERT INTO tags (case_id, name, colour) VALUES ($1,$2,$3)
-     ON CONFLICT (case_id, name) DO UPDATE SET colour=EXCLUDED.colour RETURNING *`,
-    [caseId, name, colour || '#64748b']
-  );
-  res.json(rows[0]);
+  const parentId = req.body?.parentId ?? req.body?.parent_id ?? null;
+  const cleanName = typeof name === 'string' ? name.trim() : '';
+  if (!cleanName) return res.status(400).json({ error: 'Tag name is required' });
+
+  // A parent, if given, must be an existing tag in THIS case.
+  if (parentId !== null && parentId !== undefined) {
+    const p = (await query<any>(`SELECT id FROM tags WHERE id=$1 AND case_id=$2`, [parentId, caseId])).rows[0];
+    if (!p) return res.status(400).json({ error: 'Parent tag not found in this case' });
+  }
+
+  try {
+    const { rows } = await query<any>(
+      `INSERT INTO tags (case_id, name, colour, parent_id) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (case_id, name) DO UPDATE SET colour=EXCLUDED.colour, parent_id=EXCLUDED.parent_id
+       RETURNING *`,
+      [caseId, cleanName, colour || '#3b6ea5', parentId ?? null]
+    );
+    await audit({
+      userId: req.user!.id, caseId, action: 'tag.created', target: `tag:${rows[0].id}`,
+      detail: parentId ? `"${cleanName}" under parent tag ${parentId}` : `"${cleanName}" (top-level)`,
+    });
+    res.json(rows[0]);
+  } catch (e: any) {
+    throw e;
+  }
+});
+
+// Rename and/or move a tag to another parent (reparent). Prevents cycles.
+router.put('/:caseId/tags/:tagId', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
+  const caseId = (req as any).caseId;
+  const tagId = parseInt(req.params.tagId, 10);
+  const tag = (await query<any>(`SELECT * FROM tags WHERE id=$1 AND case_id=$2`, [tagId, caseId])).rows[0];
+  if (!tag) return res.status(404).json({ error: 'Tag not found in this case' });
+
+  const body = req.body || {};
+  const next: any = { name: tag.name, colour: tag.colour, parent_id: tag.parent_id };
+
+  if (body.name !== undefined) {
+    const nm = String(body.name).trim();
+    if (!nm) return res.status(400).json({ error: 'Tag name cannot be empty' });
+    next.name = nm;
+  }
+  if (body.colour !== undefined && body.colour) next.colour = String(body.colour);
+
+  const hasParentChange = body.parentId !== undefined || body.parent_id !== undefined;
+  if (hasParentChange) {
+    const newParent = body.parentId ?? body.parent_id ?? null;
+    if (newParent === null) {
+      next.parent_id = null;
+    } else {
+      const np = parseInt(newParent, 10);
+      if (np === tagId) return res.status(400).json({ error: 'A tag cannot be its own parent' });
+      const p = (await query<any>(`SELECT id FROM tags WHERE id=$1 AND case_id=$2`, [np, caseId])).rows[0];
+      if (!p) return res.status(400).json({ error: 'Parent tag not found in this case' });
+      // Cycle check: new parent must not be the tag itself or any of its descendants.
+      const desc = (await query<any>(
+        `WITH RECURSIVE sub AS (
+           SELECT id FROM tags WHERE id=$1
+           UNION ALL
+           SELECT t.id FROM tags t JOIN sub ON t.parent_id = sub.id
+         ) SELECT id FROM sub`, [tagId]
+      )).rows.map((r) => r.id);
+      if (desc.includes(np)) return res.status(400).json({ error: 'Cannot move a tag under one of its own sub-tags' });
+      next.parent_id = np;
+    }
+  }
+
+  try {
+    await query(`UPDATE tags SET name=$1, colour=$2, parent_id=$3 WHERE id=$4`, [next.name, next.colour, next.parent_id, tagId]);
+  } catch (e: any) {
+    if (e.code === '23505') return res.status(409).json({ error: 'A tag with that name already exists in this case' });
+    throw e;
+  }
+  await audit({ userId: req.user!.id, caseId, action: 'tag.updated', target: `tag:${tagId}`, detail: `name="${next.name}", parent=${next.parent_id ?? 'none'}` });
+  const updated = (await query<any>(`SELECT * FROM tags WHERE id=$1`, [tagId])).rows[0];
+  res.json(updated);
+});
+
+// Delete a tag and its whole subtree (ON DELETE CASCADE handles children and
+// the document_tags rows for every removed tag).
+router.delete('/:caseId/tags/:tagId', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
+  const caseId = (req as any).caseId;
+  const tagId = parseInt(req.params.tagId, 10);
+  const tag = (await query<any>(`SELECT * FROM tags WHERE id=$1 AND case_id=$2`, [tagId, caseId])).rows[0];
+  if (!tag) return res.status(404).json({ error: 'Tag not found in this case' });
+
+  // Count the subtree for the audit detail before removing it.
+  const subCount = (await query<any>(
+    `WITH RECURSIVE sub AS (
+       SELECT id FROM tags WHERE id=$1
+       UNION ALL
+       SELECT t.id FROM tags t JOIN sub ON t.parent_id = sub.id
+     ) SELECT count(*)::int AS n FROM sub`, [tagId]
+  )).rows[0].n;
+
+  await query(`DELETE FROM tags WHERE id=$1`, [tagId]);
+  await audit({ userId: req.user!.id, caseId, action: 'tag.deleted', target: `tag:${tagId}`, detail: `"${tag.name}" (${subCount} tag(s) incl. sub-tags removed)` });
+  res.json({ ok: true, removed: subCount });
 });
 
 // Folders
