@@ -1,6 +1,6 @@
 import iconCharcoal from '../assets/brand/meridian-icon.png';
-import iconWhite from '../assets/brand/meridian-icon-white.png';
-import lockupInverted from '../assets/brand/meridian-logo-horizontal-inverted.png';
+import iconWhite from '../assets/brand/meridian-icon-white-transparent.png';
+import lockupInverted from '../assets/brand/meridian-logo-horizontal-inverted-transparent.png';
 
 // Icon mark only. On dark/charcoal surfaces pass `light` for the white icon;
 // on light surfaces the charcoal icon is used as-is.
