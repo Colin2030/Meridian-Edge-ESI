@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDate, reviewMeta, REVIEW_STATES } from '../lib/format';
-import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud } from 'lucide-react';
+import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks } from 'lucide-react';
 import { CaseAdminPanel } from '../components/CaseAdminPanel';
+import { KeywordListPanel, KwOptions } from '../components/KeywordListPanel';
 
 interface Tag { id: number; name: string; colour: string; }
 interface CaseInfo { id: number; name: string; case_number: string; description: string; role: string; tags: Tag[]; statusCounts: { status: string; n: number }[]; }
+interface Snippet { before: string; match: string; after: string; }
 interface DocRow {
   id: number; control_number: string; native_type: string; page_count: number; has_text: boolean;
   metadata: Record<string, string>; review_status: string; bookmarked: boolean; tags: Tag[];
+  snippet?: Snippet | null;
 }
 
 export default function CaseWorkspace() {
@@ -19,6 +22,14 @@ export default function CaseWorkspace() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [showAdmin, setShowAdmin] = useState(false);
+
+  // search mode: 'fulltext' (default, tsvector) or 'pattern' (GREP/regex)
+  const [mode, setMode] = useState<'fulltext' | 'pattern'>('fulltext');
+  const [literal, setLiteral] = useState(true);
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
+  const [showKeywords, setShowKeywords] = useState(false);
+  const [searchError, setSearchError] = useState('');
 
   // filters
   const [q, setQ] = useState('');
@@ -43,20 +54,36 @@ export default function CaseWorkspace() {
     if (dateFrom) p.set('dateFrom', dateFrom);
     if (dateTo) p.set('dateTo', dateTo);
     if (bookmarked) p.set('bookmarked', 'true');
-    p.set('sort', q && sort === 'control_number' ? 'rank' : sort);
+    if (mode === 'pattern') {
+      p.set('mode', 'pattern');
+      p.set('literal', String(literal));
+      p.set('caseSensitive', String(caseSensitive));
+      p.set('wholeWord', String(wholeWord));
+    }
+    // 'rank' sorting only applies to full-text search.
+    p.set('sort', mode === 'fulltext' && q && sort === 'control_number' ? 'rank' : sort);
     p.set('dir', dir);
     p.set('limit', String(limit));
     p.set('offset', String(page * limit));
     api.get<{ total: number; documents: DocRow[] }>(`/api/case/${caseId}/documents?${p.toString()}`)
-      .then((r) => { setDocs(r.documents); setTotal(r.total); })
+      .then((r) => { setDocs(r.documents); setTotal(r.total); setSearchError(''); })
+      .catch((e) => { setDocs([]); setTotal(0); setSearchError(e?.message || 'Search failed.'); })
       .finally(() => setLoading(false));
-  }, [caseId, q, status, tagId, dateFrom, dateTo, bookmarked, sort, dir, page]);
+  }, [caseId, q, status, tagId, dateFrom, dateTo, bookmarked, sort, dir, page, mode, literal, caseSensitive, wholeWord]);
 
   useEffect(() => { const t = setTimeout(load, q ? 250 : 0); return () => clearTimeout(t); }, [load, q]);
 
   const resetFilters = () => { setQ(''); setStatus(''); setTagId(''); setDateFrom(''); setDateTo(''); setBookmarked(false); setPage(0); };
   const activeFilters = [status, tagId, dateFrom, dateTo].filter(Boolean).length + (bookmarked ? 1 : 0);
   const canManage = info?.role === 'system_admin' || info?.role === 'case_manager';
+
+  // Jump from the keyword-list report to a filtered document list for one term.
+  const selectKeywordTerm = (term: string, opts: KwOptions) => {
+    setMode('pattern');
+    setLiteral(opts.literal); setCaseSensitive(opts.caseSensitive); setWholeWord(opts.wholeWord);
+    setQ(term); setPage(0); setShowKeywords(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   const toggleBookmark = async (d: DocRow, e: React.MouseEvent) => {
     e.preventDefault(); e.stopPropagation();
@@ -103,10 +130,29 @@ export default function CaseWorkspace() {
 
       {/* search + filters */}
       <div className="card p-4 mb-4">
+        {/* mode selector */}
+        <div className="flex flex-wrap items-center gap-3 mb-3">
+          <div className="inline-flex rounded-md border border-slate-200 overflow-hidden text-sm">
+            <button onClick={() => { setMode('fulltext'); setPage(0); }}
+              className={`px-3 py-1.5 ${mode === 'fulltext' ? 'bg-accent text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>Full text</button>
+            <button onClick={() => { setMode('pattern'); setPage(0); }}
+              className={`px-3 py-1.5 border-l border-slate-200 ${mode === 'pattern' ? 'bg-accent text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>Pattern (GREP)</button>
+          </div>
+          <span className="text-xs text-slate-400">
+            {mode === 'fulltext' ? 'Natural-language search across indexed text.' : 'Match exact text or patterns in the extracted text.'}
+          </span>
+          <div className="flex-1" />
+          <button onClick={() => setShowKeywords((s) => !s)} className={`btn-outline ${showKeywords ? 'border-accent text-accent-dark bg-accent/5' : ''}`}>
+            <ListChecks size={15} /> Keyword list
+          </button>
+        </div>
+
         <div className="flex flex-col lg:flex-row gap-3">
           <div className="relative flex-1">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input className="input pl-9" placeholder="Search full text across metadata and extracted/OCR text…"
+            <input className="input pl-9" placeholder={mode === 'pattern'
+              ? 'Find exact text or a pattern in the extracted text…'
+              : 'Search full text across metadata and extracted/OCR text…'}
               value={q} onChange={(e) => { setQ(e.target.value); setPage(0); }} />
           </div>
           <div className="flex gap-2 flex-wrap items-center">
@@ -122,7 +168,22 @@ export default function CaseWorkspace() {
             {(activeFilters > 0 || q) && <button onClick={resetFilters} className="btn-ghost text-slate-500"><X size={15} /> Clear</button>}
           </div>
         </div>
+
+        {/* pattern options */}
+        {mode === 'pattern' && (
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-3 pt-3 border-t border-slate-100">
+            <PatternOption label="Regular expression" help="Treat the search as a regex pattern (off = plain text)" checked={!literal} onChange={(v) => { setLiteral(!v); setPage(0); }} />
+            <PatternOption label="Case sensitive" help="Match upper/lower case exactly" checked={caseSensitive} onChange={(v) => { setCaseSensitive(v); setPage(0); }} />
+            <PatternOption label="Whole word only" help="Match complete words, not fragments" checked={wholeWord} onChange={(v) => { setWholeWord(v); setPage(0); }} />
+          </div>
+        )}
+
+        {searchError && (
+          <div className="mt-3 text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded px-3 py-2">{searchError}</div>
+        )}
       </div>
+
+      {showKeywords && <KeywordListPanel caseId={caseId!} onClose={() => setShowKeywords(false)} onSelectTerm={selectKeywordTerm} />}
 
       {/* grid */}
       <div className="card overflow-hidden">
@@ -148,8 +209,10 @@ export default function CaseWorkspace() {
             ) : docs.map((d) => {
               const m = d.metadata || {};
               const rm = reviewMeta(d.review_status);
+              const snip = mode === 'pattern' ? d.snippet : null;
               return (
-                <tr key={d.id} className="hover:bg-accent/[0.03] transition">
+              <Fragment key={d.id}>
+                <tr className={`hover:bg-accent/[0.03] transition ${snip ? 'border-b-0' : ''}`}>
                   <td className="px-3 py-2.5">
                     <button onClick={(e) => toggleBookmark(d, e)} title="Bookmark">
                       <Bookmark size={16} className={d.bookmarked ? 'fill-accent text-accent' : 'text-slate-300 hover:text-slate-400'} />
@@ -178,6 +241,19 @@ export default function CaseWorkspace() {
                   </td>
                   <td className="px-3 py-2.5"><span className={`badge ${rm.cls}`}>{rm.label}</span></td>
                 </tr>
+                {snip && (
+                  <tr className="bg-slate-50/60">
+                    <td></td>
+                    <td colSpan={8} className="px-3 pb-2.5 pt-0 text-xs text-slate-500">
+                      <Link to={`/cases/${caseId}/documents/${d.id}`} className="hover:text-accent-dark">
+                        <span className="font-mono">{snip.before}</span>
+                        {snip.match && <mark className="bg-amber-200 text-navy-900 rounded px-0.5 font-mono">{snip.match}</mark>}
+                        <span className="font-mono">{snip.after}</span>
+                      </Link>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
               );
             })}
           </tbody>
@@ -196,6 +272,18 @@ export default function CaseWorkspace() {
         </div>
       )}
     </div>
+  );
+}
+
+function PatternOption({ label, help, checked, onChange }: { label: string; help: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="inline-flex items-start gap-2 cursor-pointer select-none" title={help}>
+      <input type="checkbox" className="mt-0.5 accent-accent" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span className="text-sm">
+        <span className="text-slate-700">{label}</span>
+        <span className="block text-xs text-slate-400 leading-tight">{help}</span>
+      </span>
+    </label>
   );
 }
 
