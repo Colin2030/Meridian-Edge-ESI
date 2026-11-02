@@ -1,0 +1,48 @@
+### Meridian Edge — systemd service unit (TEMPLATE)
+#
+# Install (as root), after `npm install && npm run build && npm run migrate && npm run seed`:
+#   sudo cp deploy/meridian-edge.service /etc/systemd/system/meridian-edge.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now meridian-edge
+#   journalctl -u meridian-edge -f      # follow logs
+#
+# Adjust User/Group, WorkingDirectory and the node path to match the target host.
+# All configuration (PORT, DATABASE_URL, SESSION_SECRET, ENABLE_OCR) comes from the
+# EnvironmentFile below — no secrets are baked into this unit.
+
+[Unit]
+Description=Meridian Edge ESI Review Platform
+Documentation=file:///home/ubuntu/meridian-edge/README.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+# On the Abacus VM /home/ubuntu mounts late at boot — never start before it exists.
+RequiresMountsFor=/home/ubuntu
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/meridian-edge
+EnvironmentFile=/home/ubuntu/meridian-edge/.env
+# Use an absolute node path (systemd units do not inherit the login shell PATH).
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=3
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meridian-edge
+
+# --- Hardening (safe defaults; relax only if something legitimately needs it) ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

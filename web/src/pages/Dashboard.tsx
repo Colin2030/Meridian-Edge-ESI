@@ -1,0 +1,91 @@
+import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { api } from '../lib/api';
+import { useAuth } from '../lib/auth';
+import { fmtDate } from '../lib/format';
+import { FolderOpen, FileText, CheckCircle2, Bookmark, ArrowRight, ShieldCheck } from 'lucide-react';
+
+interface CaseRow {
+  id: number; name: string; case_number: string; description: string; status: string; created_at: string;
+  doc_count: number; reviewed_count: number; bookmark_count: number; role: string;
+}
+
+const roleLabel: Record<string, string> = {
+  system_admin: 'System admin', case_manager: 'Case manager', reviewer: 'Reviewer', read_only: 'Read only',
+};
+const roleCls: Record<string, string> = {
+  system_admin: 'bg-navy-900 text-white', case_manager: 'bg-accent/15 text-accent-dark',
+  reviewer: 'bg-sky-100 text-sky-700', read_only: 'bg-slate-100 text-slate-600',
+};
+
+export default function Dashboard() {
+  const { user } = useAuth();
+  const [cases, setCases] = useState<CaseRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => { api.get<CaseRow[]>('/api/cases').then(setCases).finally(() => setLoading(false)); }, []);
+
+  return (
+    <div className="mx-auto max-w-[1600px] px-5 py-8">
+      <div className="flex items-end justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-navy-900">Cases</h1>
+          <p className="text-sm text-slate-500 mt-1">Investigations you have been granted access to.</p>
+        </div>
+        {user?.isSystemAdmin && (
+          <Link to="/admin" className="btn-outline"><ShieldCheck size={16} /> Manage cases & users</Link>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="text-slate-400 py-20 text-center">Loading cases…</div>
+      ) : cases.length === 0 ? (
+        <div className="card p-12 text-center text-slate-500">
+          <FolderOpen className="mx-auto mb-3 text-slate-300" size={40} />
+          No cases are currently assigned to you.
+        </div>
+      ) : (
+        <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+          {cases.map((c) => {
+            const pct = c.doc_count ? Math.round((c.reviewed_count / c.doc_count) * 100) : 0;
+            return (
+              <Link key={c.id} to={`/cases/${c.id}`} className="card p-5 hover:shadow-panel hover:border-accent/40 transition group">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-navy-900/5 text-navy-900"><FolderOpen size={20} /></span>
+                    <div>
+                      <div className="font-semibold text-navy-900 leading-tight group-hover:text-accent-dark transition">{c.name}</div>
+                      <div className="text-xs text-slate-400 mt-0.5">{c.case_number || '—'} · opened {fmtDate(c.created_at)}</div>
+                    </div>
+                  </div>
+                  <span className={`badge ${roleCls[c.role] || 'bg-slate-100 text-slate-600'}`}>{roleLabel[c.role] || c.role}</span>
+                </div>
+                {c.description && <p className="mt-3 text-sm text-slate-500 line-clamp-2">{c.description}</p>}
+                <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded-lg bg-slate-50 py-2">
+                    <div className="flex items-center justify-center gap-1 text-navy-900 font-semibold"><FileText size={14} />{c.doc_count}</div>
+                    <div className="text-[11px] text-slate-400">Documents</div>
+                  </div>
+                  <div className="rounded-lg bg-slate-50 py-2">
+                    <div className="flex items-center justify-center gap-1 text-emerald-700 font-semibold"><CheckCircle2 size={14} />{pct}%</div>
+                    <div className="text-[11px] text-slate-400">Reviewed</div>
+                  </div>
+                  <div className="rounded-lg bg-slate-50 py-2">
+                    <div className="flex items-center justify-center gap-1 text-accent-dark font-semibold"><Bookmark size={14} />{c.bookmark_count}</div>
+                    <div className="text-[11px] text-slate-400">Bookmarks</div>
+                  </div>
+                </div>
+                <div className="mt-4 h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+                  <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
+                </div>
+                <div className="mt-4 flex items-center justify-end text-sm font-medium text-accent-dark opacity-0 group-hover:opacity-100 transition">
+                  Open workspace <ArrowRight size={15} className="ml-1" />
+                </div>
+              </Link>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

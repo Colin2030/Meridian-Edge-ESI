@@ -1,0 +1,11 @@
+node_modules/
+web/node_modules/
+dist/
+web/dist/
+uploads/
+.env
+*.log
+npm-debug.log*
+.DS_Store
+sample-data/
+*.exit

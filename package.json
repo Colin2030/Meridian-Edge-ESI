@@ -1,0 +1,42 @@
+{
+  "name": "meridian-edge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Meridian Edge — ESI review platform (PoC)",
+  "type": "commonjs",
+  "scripts": {
+    "postinstall": "cd web && npm install",
+    "build:web": "cd web && npm run build",
+    "build:server": "tsc -p tsconfig.json",
+    "build": "npm run build:web && npm run build:server",
+    "migrate": "ts-node scripts/migrate.ts",
+    "seed": "ts-node scripts/seed.ts",
+    "import": "ts-node scripts/import.ts",
+    "gen-samples": "ts-node scripts/gen_samples.ts",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn src/index.ts"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-async-errors": "^3.1.1",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.7",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/multer": "^1.4.11",
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.6",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.0"
+  }
+}
