@@ -10,12 +10,17 @@ const router = Router();
 router.post('/login', async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'username and password required' });
-  const { rows } = await query<any>(`SELECT * FROM users WHERE username=$1 AND active=TRUE`, [username]);
+  const { rows } = await query<any>(`SELECT * FROM users WHERE username=$1`, [username]);
   if (!rows.length || !verifyPassword(password, rows[0].password_hash)) {
     await audit({ action: 'login_failed', target: username });
     return res.status(401).json({ error: 'Invalid credentials' });
   }
   const u = rows[0];
+  // Block deactivated accounts with a clear message (credentials already verified).
+  if (!u.active) {
+    await audit({ userId: u.id, action: 'login_blocked_inactive', target: username });
+    return res.status(403).json({ error: 'This account is inactive. Please contact a system administrator.' });
+  }
   const token = signToken({ uid: u.id, username: u.username, isSystemAdmin: u.is_system_admin });
   res.cookie('me_session', token, {
     httpOnly: true,

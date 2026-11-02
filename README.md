@@ -55,7 +55,15 @@ external runtime dependencies**.
   pdf.js (no CDN), metadata panel, keyboard navigation (`J`/`K`).
 - **Review workflow** — per-document review states (unreviewed / responsive / not-responsive /
   privileged / needs-further-review), bookmarks, tags, folders and threaded comments.
-- **Audit logging** of significant actions (login, review changes, imports, admin changes).
+- **User & case administration** (system admin) — create cases, edit case details, and **delete**
+  a case with all its data; create users and **edit existing users**: change display name / username /
+  email, **reset passwords** (set an explicit one, or generate a one-time temporary password),
+  promote/demote **system administrator**, **activate/deactivate** accounts (inactive users are
+  blocked from logging in and rejected on their next request), and manage each user's **per-case
+  roles** from the user side. Lockout guards prevent self-demotion/self-deactivation and removing
+  the last active system admin. See [User administration](#user-administration).
+- **Audit logging** of significant actions (login, review changes, imports, admin changes — including
+  `user.updated`, `user.password_reset`, `user.role_changed`, `user.activated`/`user.deactivated`).
 - **Elegant, calm, non-technical-friendly UI** in the official **monochrome charcoal** Meridian
   Edge identity (charcoal `#202020` / white, with a restrained steel-blue accent), using the
   official logo marks and a locally-bundled favicon — all assets self-hosted (no hotlinking).
@@ -230,6 +238,32 @@ Enforced **server-side** on every request (never trusted from the client).
 | Access a case they are **not** a member of | ✓ | — (403) | — (403) | — (403) |
 
 Role hierarchy: `system_admin` (global) › `case_manager` › `reviewer` › `read_only`.
+
+---
+
+## User administration
+
+System administrators manage accounts from **Administration → Users**. Each user row has an **Edit**
+action (and a quick Activate/Deactivate toggle); Edit opens a panel to correct a record or manage
+access. All of the endpoints below are **system-admin-only, enforced server-side**, and every change
+is written to the audit log (password values are never logged).
+
+| Action | Endpoint | Notes |
+|---|---|---|
+| List users | `GET /api/admin/users` | |
+| Create user | `POST /api/admin/users` | |
+| **Edit profile** | `PUT /api/admin/users/:id` | Update `displayName` / `username` / `email`. Display name & username must be non-empty; username must be unique (`409`); email format-checked. Audits each field old → new (`user.updated`). |
+| **Reset password** | `POST /api/admin/users/:id/reset-password` | Mode (a) `{ newPassword }` (min 8 chars); mode (b) `{ generate: true }` returns a strong `temporaryPassword` **once** in the response. bcrypt-hashed; audits `user.password_reset` (no value). |
+| **Change global role** | `PUT /api/admin/users/:id/role` | `{ isSystemAdmin }` — promote/demote system administrator. Audits `user.role_changed`. |
+| **Activate / deactivate** | `PUT /api/admin/users/:id/active` | `{ active }`. Inactive users cannot log in (`403 "This account is inactive…"`) and existing sessions are rejected on the next request. Audits `user.activated` / `user.deactivated`. |
+| **List a user's case access** | `GET /api/admin/users/:id/memberships` | Cases + role. |
+| **Add / change per-case role** | `POST /api/admin/users/:id/memberships` | `{ caseId, role }` (`case_manager` / `reviewer` / `read_only`); upserts. Audits `member_assigned` / `member_role_changed`. |
+| **Remove from a case** | `DELETE /api/admin/users/:id/memberships/:caseId` | Audits `member_removed`. |
+
+**Lockout guards** (return `400` with a clear message): an admin cannot remove their own system-admin
+access or deactivate their own account, and the **last active system administrator** cannot be demoted
+or deactivated — so the platform can never be locked out. User **deletion is intentionally not
+provided**; deactivation is the safe, reversible way to retire an account.
 
 ---
 

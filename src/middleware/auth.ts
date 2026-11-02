@@ -6,13 +6,29 @@ export interface AuthedRequest extends Request {
   user?: { id: number; username: string; isSystemAdmin: boolean };
 }
 
-export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
+export async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   const token = req.cookies?.me_session;
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
   const payload = verifyToken(token);
   if (!payload) return res.status(401).json({ error: 'Invalid or expired session' });
-  req.user = { id: payload.uid, username: payload.username, isSystemAdmin: payload.isSystemAdmin };
-  next();
+  try {
+    // Re-check the account on every request so that a deactivation or a role
+    // change (e.g. demotion) takes effect immediately for existing sessions,
+    // rather than only at next login. One indexed primary-key lookup.
+    const { rows } = await query<{ active: boolean; is_system_admin: boolean; username: string }>(
+      `SELECT active, is_system_admin, username FROM users WHERE id=$1`,
+      [payload.uid]
+    );
+    if (!rows.length) return res.status(401).json({ error: 'User not found' });
+    if (!rows[0].active) {
+      res.clearCookie('me_session');
+      return res.status(403).json({ error: 'This account is inactive. Please contact a system administrator.' });
+    }
+    req.user = { id: payload.uid, username: rows[0].username, isSystemAdmin: rows[0].is_system_admin };
+    next();
+  } catch (e) {
+    next(e);
+  }
 }
 
 export function requireSystemAdmin(req: AuthedRequest, res: Response, next: NextFunction) {

@@ -35,21 +35,194 @@ router.post('/users', requireAuth, requireSystemAdmin, async (req: AuthedRequest
   }
 });
 
-// Update user (active flag / admin flag / password)
+// ---- User administration (system admin only, global) -----------------------
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function loadUser(id: number) {
+  const { rows } = await query<any>(
+    `SELECT id, username, email, display_name, is_system_admin, active FROM users WHERE id=$1`,
+    [id]
+  );
+  return rows[0] || null;
+}
+
+// Count of OTHER active system admins (excludes the given user id).
+async function otherActiveAdmins(excludeId: number): Promise<number> {
+  const { rows } = await query<any>(
+    `SELECT count(*)::int AS n FROM users WHERE is_system_admin=TRUE AND active=TRUE AND id<>$1`,
+    [excludeId]
+  );
+  return rows[0].n;
+}
+
+function tempPassword(len = 14): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*';
+  let out = '';
+  const buf = require('crypto').randomBytes(len);
+  for (let i = 0; i < len; i++) out += chars[buf[i] % chars.length];
+  return out;
+}
+
+// Edit a user's profile: display_name, username, email. Audits each field old->new.
 router.put('/users/:id', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
   const id = parseInt(req.params.id, 10);
-  const { active, isSystemAdmin, password, displayName, email } = req.body || {};
+  if (!id || Number.isNaN(id)) return res.status(400).json({ error: 'Invalid user id' });
+  const cur = await loadUser(id);
+  if (!cur) return res.status(404).json({ error: 'User not found' });
+
+  const { displayName, username, email } = req.body || {};
   const sets: string[] = [];
   const params: any[] = [];
-  if (active !== undefined) { params.push(active); sets.push(`active=$${params.length}`); }
-  if (isSystemAdmin !== undefined) { params.push(isSystemAdmin); sets.push(`is_system_admin=$${params.length}`); }
-  if (displayName) { params.push(displayName); sets.push(`display_name=$${params.length}`); }
-  if (email !== undefined) { params.push(email); sets.push(`email=$${params.length}`); }
-  if (password) { params.push(hashPassword(password)); sets.push(`password_hash=$${params.length}`); }
-  if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+  const changes: string[] = [];
+
+  if (displayName !== undefined) {
+    const v = String(displayName).trim();
+    if (!v) return res.status(400).json({ error: 'Display name cannot be empty' });
+    if (v !== cur.display_name) { params.push(v); sets.push(`display_name=$${params.length}`); changes.push(`name "${cur.display_name}" -> "${v}"`); }
+  }
+  if (username !== undefined) {
+    const v = String(username).trim();
+    if (!v) return res.status(400).json({ error: 'Username cannot be empty' });
+    if (v !== cur.username) {
+      const dup = await query<any>(`SELECT 1 FROM users WHERE lower(username)=lower($1) AND id<>$2`, [v, id]);
+      if (dup.rows.length) return res.status(409).json({ error: `Username "${v}" is already taken` });
+      params.push(v); sets.push(`username=$${params.length}`); changes.push(`username "${cur.username}" -> "${v}"`);
+    }
+  }
+  if (email !== undefined) {
+    const raw = email === null ? '' : String(email).trim();
+    const v = raw || null;
+    if (v && !EMAIL_RE.test(v)) return res.status(400).json({ error: 'Email address is not valid' });
+    if (v !== cur.email) { params.push(v); sets.push(`email=$${params.length}`); changes.push(`email "${cur.email || '—'}" -> "${v || '—'}"`); }
+  }
+
+  if (!sets.length) return res.json(await loadUser(id));
   params.push(id);
-  await query(`UPDATE users SET ${sets.join(', ')} WHERE id=$${params.length}`, params);
-  await audit({ userId: req.user!.id, action: 'user_updated', target: `user:${id}` });
+  try {
+    await query(`UPDATE users SET ${sets.join(', ')} WHERE id=$${params.length}`, params);
+  } catch (e: any) {
+    if (e.code === '23505') return res.status(409).json({ error: 'Username is already taken' });
+    throw e;
+  }
+  await audit({ userId: req.user!.id, action: 'user.updated', target: `user:${id}`, detail: `${cur.username}: ${changes.join('; ')}` });
+  res.json(await loadUser(id));
+});
+
+// Reset a user's password. Mode (a) explicit newPassword; mode (b) generate=true
+// returns a strong temporary password ONCE in the response body.
+router.post('/users/:id/reset-password', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id || Number.isNaN(id)) return res.status(400).json({ error: 'Invalid user id' });
+  const cur = await loadUser(id);
+  if (!cur) return res.status(404).json({ error: 'User not found' });
+
+  const { newPassword, generate } = req.body || {};
+  let pw: string;
+  let generated = false;
+  if (generate) {
+    pw = tempPassword();
+    generated = true;
+  } else {
+    pw = String(newPassword || '');
+    if (pw.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
+  await query(`UPDATE users SET password_hash=$1 WHERE id=$2`, [hashPassword(pw), id]);
+  // NB: never audit/log the password value itself.
+  await audit({ userId: req.user!.id, action: 'user.password_reset', target: `user:${id}`, detail: `${cur.username}${generated ? ' (temporary password generated)' : ''}` });
+  res.json(generated ? { ok: true, temporaryPassword: pw } : { ok: true });
+});
+
+// Change global role: promote/demote system administrator. Guards against
+// self-demotion and demoting the last remaining active system admin.
+router.put('/users/:id/role', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id || Number.isNaN(id)) return res.status(400).json({ error: 'Invalid user id' });
+  const cur = await loadUser(id);
+  if (!cur) return res.status(404).json({ error: 'User not found' });
+  const { isSystemAdmin } = req.body || {};
+  if (typeof isSystemAdmin !== 'boolean') return res.status(400).json({ error: 'isSystemAdmin (boolean) required' });
+
+  if (cur.is_system_admin && !isSystemAdmin) {
+    // Demotion guards
+    if (id === req.user!.id) return res.status(400).json({ error: 'You cannot remove your own system administrator access' });
+    if ((await otherActiveAdmins(id)) === 0) return res.status(400).json({ error: 'Cannot demote the last active system administrator' });
+  }
+  if (cur.is_system_admin === isSystemAdmin) return res.json(await loadUser(id));
+
+  await query(`UPDATE users SET is_system_admin=$1 WHERE id=$2`, [isSystemAdmin, id]);
+  await audit({ userId: req.user!.id, action: 'user.role_changed', target: `user:${id}`, detail: `${cur.username}: system_admin ${cur.is_system_admin} -> ${isSystemAdmin}` });
+  res.json(await loadUser(id));
+});
+
+// Activate / deactivate a user. A deactivated user is blocked from logging in
+// (and rejected on the next request). Guards against self-deactivation and
+// deactivating the last remaining active system admin.
+router.put('/users/:id/active', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id || Number.isNaN(id)) return res.status(400).json({ error: 'Invalid user id' });
+  const cur = await loadUser(id);
+  if (!cur) return res.status(404).json({ error: 'User not found' });
+  const { active } = req.body || {};
+  if (typeof active !== 'boolean') return res.status(400).json({ error: 'active (boolean) required' });
+
+  if (cur.active && !active) {
+    // Deactivation guards
+    if (id === req.user!.id) return res.status(400).json({ error: 'You cannot deactivate your own account' });
+    if (cur.is_system_admin && (await otherActiveAdmins(id)) === 0) return res.status(400).json({ error: 'Cannot deactivate the last active system administrator' });
+  }
+  if (cur.active === active) return res.json(await loadUser(id));
+
+  await query(`UPDATE users SET active=$1 WHERE id=$2`, [active, id]);
+  await audit({ userId: req.user!.id, action: active ? 'user.activated' : 'user.deactivated', target: `user:${id}`, detail: cur.username });
+  res.json(await loadUser(id));
+});
+
+// ---- A user's case memberships (managed from the user side) -----------------
+router.get('/users/:id/memberships', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { rows } = await query<any>(
+    `SELECT m.case_id, m.role, c.name AS case_name, c.case_number
+     FROM case_memberships m JOIN cases c ON c.id=m.case_id
+     WHERE m.user_id=$1 ORDER BY c.name`,
+    [id]
+  );
+  res.json(rows);
+});
+
+const CASE_ROLES = ['case_manager', 'reviewer', 'read_only'];
+
+router.post('/users/:id/memberships', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
+  const id = parseInt(req.params.id, 10);
+  const cur = await loadUser(id);
+  if (!cur) return res.status(404).json({ error: 'User not found' });
+  const caseId = parseInt(req.body?.caseId, 10);
+  const role = req.body?.role;
+  if (!caseId || Number.isNaN(caseId) || !CASE_ROLES.includes(role))
+    return res.status(400).json({ error: 'caseId and a valid role (case_manager / reviewer / read_only) required' });
+  const c = (await query<any>(`SELECT id, name FROM cases WHERE id=$1`, [caseId])).rows[0];
+  if (!c) return res.status(404).json({ error: 'Case not found' });
+  const existing = (await query<any>(`SELECT role FROM case_memberships WHERE user_id=$1 AND case_id=$2`, [id, caseId])).rows[0];
+  await query(
+    `INSERT INTO case_memberships (user_id, case_id, role) VALUES ($1,$2,$3)
+     ON CONFLICT (user_id, case_id) DO UPDATE SET role=EXCLUDED.role`,
+    [id, caseId, role]
+  );
+  await audit({
+    userId: req.user!.id, caseId, action: existing ? 'member_role_changed' : 'member_assigned',
+    target: `user:${id}`,
+    detail: existing ? `${cur.username} on "${c.name}": ${existing.role} -> ${role}` : `${cur.username} added to "${c.name}" as ${role}`,
+  });
+  res.json({ ok: true });
+});
+
+router.delete('/users/:id/memberships/:caseId', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
+  const id = parseInt(req.params.id, 10);
+  const caseId = parseInt(req.params.caseId, 10);
+  const cur = await loadUser(id);
+  const c = (await query<any>(`SELECT name FROM cases WHERE id=$1`, [caseId])).rows[0];
+  await query(`DELETE FROM case_memberships WHERE user_id=$1 AND case_id=$2`, [id, caseId]);
+  await audit({ userId: req.user!.id, caseId, action: 'member_removed', target: `user:${id}`, detail: `${cur?.username || id} removed from "${c?.name || caseId}"` });
   res.json({ ok: true });
 });
 
