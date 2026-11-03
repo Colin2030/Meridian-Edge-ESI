@@ -4,7 +4,7 @@ import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import {
   FileText, Mail, Users, ChevronLeft, ArrowRight, UploadCloud, Settings2,
-  ListChecks, Tag as TagIcon, FolderOpen,
+  ListChecks, Tag as TagIcon, FolderOpen, BookMarked,
 } from 'lucide-react';
 
 // ---- Types for the ECA metrics payload (GET /api/cases/:caseId/eca) ----------
@@ -90,12 +90,15 @@ export default function CaseHome() {
           </p>
           {eca.case.description && <p className="text-sm text-slate-500 mt-2 max-w-3xl">{eca.case.description}</p>}
         </div>
-        {canManage && (
-          <div className="flex items-center gap-2 shrink-0">
-            <Link to={`/cases/${caseId}/import`} className="btn-outline"><UploadCloud size={16} /> Add case data</Link>
-            <Link to={`${reviewHref}?settings=1`} className="btn-outline"><Settings2 size={16} /> Case settings</Link>
-          </div>
-        )}
+        <div className="flex items-center gap-2 shrink-0">
+          <Link to={`/cases/${caseId}/binders`} className="btn-outline"><BookMarked size={16} /> Binders</Link>
+          {canManage && (
+            <>
+              <Link to={`/cases/${caseId}/import`} className="btn-outline"><UploadCloud size={16} /> Add case data</Link>
+              <Link to={`${reviewHref}?settings=1`} className="btn-outline"><Settings2 size={16} /> Case settings</Link>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Empty-case friendly state */}

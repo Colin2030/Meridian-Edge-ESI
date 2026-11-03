@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { Wordmark } from '../components/Logo';
 import { ShieldCheck, Lock } from 'lucide-react';
@@ -9,17 +9,20 @@ import stackedLogo from '../assets/brand/meridian-logo-stacked-inverted.png';
 export default function Login() {
   const { login, user } = useAuth();
   const nav = useNavigate();
+  const loc = useLocation();
+  // Return the user to the page they originally requested (e.g. a shared binder URL).
+  const dest = (loc.state as { from?: string } | null)?.from || '/';
   const [username, setU] = useState('');
   const [password, setP] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
-  if (user) { nav('/'); }
+  if (user) { nav(dest, { replace: true }); }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(''); setBusy(true);
-    try { await login(username, password); nav('/'); }
+    try { await login(username, password); nav(dest, { replace: true }); }
     catch (e: any) { setErr(e.message || 'Login failed'); }
     finally { setBusy(false); }
   };

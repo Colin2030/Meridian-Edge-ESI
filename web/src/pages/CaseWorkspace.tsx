@@ -2,10 +2,11 @@ import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDate, reviewMeta, REVIEW_STATES } from '../lib/format';
-import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks, ClipboardList } from 'lucide-react';
+import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks, ClipboardList, BookMarked, FolderPlus, CheckCircle2 } from 'lucide-react';
 import { CaseAdminPanel } from '../components/CaseAdminPanel';
 import { KeywordListPanel, KwOptions } from '../components/KeywordListPanel';
 import { ReportBuilder } from '../components/ReportBuilder';
+import { AddToBinder } from '../components/AddToBinder';
 
 interface Tag { id: number; name: string; colour: string; }
 interface CaseInfo { id: number; name: string; case_number: string; description: string; role: string; tags: Tag[]; statusCounts: { status: string; n: number }[]; }
@@ -47,10 +48,17 @@ export default function CaseWorkspace() {
   const [page, setPage] = useState(0);
   const limit = 25;
 
+  // selection + binders
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [selectAllMatching, setSelectAllMatching] = useState(false);
+  const [showAddBinder, setShowAddBinder] = useState(false);
+  const [toast, setToast] = useState('');
+
   useEffect(() => { api.get<CaseInfo>(`/api/cases/${caseId}`).then(setInfo); }, [caseId]);
 
-  const load = useCallback(() => {
-    setLoading(true);
+  // Build the document-list query params for the active search/filter state.
+  // `extra` lets callers override limit/offset (e.g. to resolve all matching ids).
+  const buildParams = useCallback((extra?: Record<string, string>) => {
     const p = new URLSearchParams();
     if (q) p.set('q', q);
     if (status) p.set('status', status);
@@ -64,23 +72,67 @@ export default function CaseWorkspace() {
       p.set('caseSensitive', String(caseSensitive));
       p.set('wholeWord', String(wholeWord));
     }
-    // 'rank' sorting only applies to full-text search.
     p.set('sort', mode === 'fulltext' && q && sort === 'control_number' ? 'rank' : sort);
     p.set('dir', dir);
     p.set('limit', String(limit));
     p.set('offset', String(page * limit));
-    api.get<{ total: number; documents: DocRow[] }>(`/api/case/${caseId}/documents?${p.toString()}`)
+    if (extra) for (const [k, v] of Object.entries(extra)) p.set(k, v);
+    return p;
+  }, [q, status, tagId, dateFrom, dateTo, bookmarked, sort, dir, page, mode, literal, caseSensitive, wholeWord]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api.get<{ total: number; documents: DocRow[] }>(`/api/case/${caseId}/documents?${buildParams().toString()}`)
       .then((r) => { setDocs(r.documents); setTotal(r.total); setSearchError(''); })
       .catch((e) => { setDocs([]); setTotal(0); setSearchError(e?.message || 'Search failed.'); })
       .finally(() => setLoading(false));
-  }, [caseId, q, status, tagId, dateFrom, dateTo, bookmarked, sort, dir, page, mode, literal, caseSensitive, wholeWord]);
+  }, [caseId, buildParams]);
 
   useEffect(() => { const t = setTimeout(load, q ? 250 : 0); return () => clearTimeout(t); }, [load, q]);
+
+  // Clear any selection whenever the result set changes (new filter/search).
+  useEffect(() => { setSelected(new Set()); setSelectAllMatching(false); }, [q, status, tagId, dateFrom, dateTo, bookmarked, mode, literal, caseSensitive, wholeWord]);
+
+  // Resolve the ids to add to a binder: the whole matching set when "select all
+  // matching" is active (paged fetch, 200 at a time), otherwise the ticked rows.
+  const resolveSelectedIds = useCallback(async (): Promise<number[]> => {
+    if (!selectAllMatching) return Array.from(selected);
+    const ids: number[] = [];
+    const pageSize = 200;
+    for (let off = 0; off < total; off += pageSize) {
+      const p = buildParams({ limit: String(pageSize), offset: String(off) });
+      const r = await api.get<{ documents: { id: number }[] }>(`/api/case/${caseId}/documents?${p.toString()}`);
+      ids.push(...r.documents.map((d) => d.id));
+      if (r.documents.length < pageSize) break;
+    }
+    return ids;
+  }, [selectAllMatching, selected, total, buildParams, caseId]);
 
   const resetFilters = () => { setQ(''); setStatus(''); setTagId(''); setDateFrom(''); setDateTo(''); setBookmarked(false); setPage(0); };
   const activeFilters = [status, tagId, dateFrom, dateTo].filter(Boolean).length + (bookmarked ? 1 : 0);
   const canManage = info?.role === 'system_admin' || info?.role === 'case_manager';
   const canReport = canManage || info?.role === 'reviewer';
+  const canBinder = canReport; // reviewer+ may group documents into binders
+
+  // selection helpers
+  const selectionCount = selectAllMatching ? total : selected.size;
+  const pageIds = docs.map((d) => d.id);
+  const allOnPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const toggleRow = (id: number) => {
+    setSelectAllMatching(false);
+    setSelected((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  };
+  const togglePage = () => {
+    setSelectAllMatching(false);
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (allOnPageSelected) pageIds.forEach((id) => n.delete(id));
+      else pageIds.forEach((id) => n.add(id));
+      return n;
+    });
+  };
+  const clearSelection = () => { setSelected(new Set()); setSelectAllMatching(false); };
+  const isRowSelected = (id: number) => selectAllMatching || selected.has(id);
 
   // Jump from the keyword-list report to a filtered document list for one term.
   const selectKeywordTerm = (term: string, opts: KwOptions) => {
@@ -107,19 +159,18 @@ export default function CaseWorkspace() {
           <h1 className="text-2xl font-bold text-navy-900 mt-1">{info?.name || 'Loading…'}</h1>
           <p className="text-sm text-slate-500">{info?.case_number} · {total} documents · your role: <span className="font-medium text-slate-700">{(info?.role || '').replace('_', ' ')}</span></p>
         </div>
-        {(canReport || canManage) && (
-          <div className="flex items-center gap-2">
-            {canReport && (
-              <button onClick={() => setShowReport(true)} className="btn-outline"><ClipboardList size={16} /> Build report</button>
-            )}
-            {canManage && (
-              <>
-                <Link to={`/cases/${caseId}/import`} className="btn-primary"><UploadCloud size={16} /> Add case data</Link>
-                <button onClick={() => setShowAdmin((s) => !s)} className="btn-outline"><Settings2 size={16} /> Case settings</button>
-              </>
-            )}
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          <Link to={`/cases/${caseId}/binders`} className="btn-outline"><BookMarked size={16} /> Binders</Link>
+          {canReport && (
+            <button onClick={() => setShowReport(true)} className="btn-outline"><ClipboardList size={16} /> Build report</button>
+          )}
+          {canManage && (
+            <>
+              <Link to={`/cases/${caseId}/import`} className="btn-primary"><UploadCloud size={16} /> Add case data</Link>
+              <button onClick={() => setShowAdmin((s) => !s)} className="btn-outline"><Settings2 size={16} /> Case settings</button>
+            </>
+          )}
+        </div>
       </div>
 
       {showAdmin && canManage && info && (
@@ -128,6 +179,27 @@ export default function CaseWorkspace() {
 
       {showReport && info && (
         <ReportBuilder caseId={info.id} caseName={`${info.name} · ${info.case_number}`} onClose={() => setShowReport(false)} />
+      )}
+
+      {showAddBinder && info && (
+        <AddToBinder
+          caseId={info.id}
+          count={selectionCount}
+          resolveIds={resolveSelectedIds}
+          onClose={() => setShowAddBinder(false)}
+          onAdded={({ added, skipped, binderName }) => {
+            setShowAddBinder(false);
+            clearSelection();
+            setToast(`${added} document${added === 1 ? '' : 's'} added to '${binderName}'${skipped ? ` · ${skipped} already present` : ''}`);
+            setTimeout(() => setToast(''), 5000);
+          }}
+        />
+      )}
+
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-lg bg-navy-900 text-white px-4 py-3 shadow-lg text-sm">
+          <CheckCircle2 size={18} className="text-emerald-400" /> {toast}
+        </div>
       )}
 
       {/* status summary chips */}
@@ -201,11 +273,36 @@ export default function CaseWorkspace() {
 
       {showKeywords && <KeywordListPanel caseId={caseId!} onClose={() => setShowKeywords(false)} onSelectTerm={selectKeywordTerm} />}
 
+      {/* bulk selection action bar */}
+      {canBinder && selectionCount > 0 && (
+        <div className="sticky top-2 z-30 mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-accent/30 bg-accent/5 px-4 py-2.5 text-sm">
+          <span className="font-semibold text-navy-900">{selectionCount} document{selectionCount === 1 ? '' : 's'} selected</span>
+          {/* Offer selecting the entire matching set, not just the current page. */}
+          {!selectAllMatching && allOnPageSelected && total > selected.size && (
+            <button onClick={() => setSelectAllMatching(true)} className="text-accent-dark underline underline-offset-2 hover:text-accent">
+              Select all {total} matching
+            </button>
+          )}
+          {selectAllMatching && (
+            <span className="text-slate-500">All documents matching the current filter are selected.</span>
+          )}
+          <div className="flex-1" />
+          <button onClick={() => setShowAddBinder(true)} className="btn-primary"><FolderPlus size={15} /> Add to binder</button>
+          <button onClick={clearSelection} className="btn-ghost text-slate-500"><X size={15} /> Clear</button>
+        </div>
+      )}
+
       {/* grid */}
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+              {canBinder && (
+                <th className="px-3 py-2.5 w-8">
+                  <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-accent focus:ring-accent align-middle"
+                    checked={allOnPageSelected || selectAllMatching} onChange={togglePage} title="Select all on this page" />
+                </th>
+              )}
               <th className="px-3 py-2.5 w-8"></th>
               <Th label="Control #" col="control_number" sort={sort} dir={dir} onSort={(c, d) => { setSort(c); setDir(d); }} />
               <th className="px-3 py-2.5">Date</th>
@@ -219,16 +316,22 @@ export default function CaseWorkspace() {
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
-              <tr><td colSpan={9} className="py-16 text-center text-slate-400">Searching…</td></tr>
+              <tr><td colSpan={canBinder ? 10 : 9} className="py-16 text-center text-slate-400">Searching…</td></tr>
             ) : docs.length === 0 ? (
-              <tr><td colSpan={9} className="py-16 text-center text-slate-400"><Filter className="mx-auto mb-2 text-slate-300" size={28} />No documents match your filters.</td></tr>
+              <tr><td colSpan={canBinder ? 10 : 9} className="py-16 text-center text-slate-400"><Filter className="mx-auto mb-2 text-slate-300" size={28} />No documents match your filters.</td></tr>
             ) : docs.map((d) => {
               const m = d.metadata || {};
               const rm = reviewMeta(d.review_status);
               const snip = mode === 'pattern' ? d.snippet : null;
               return (
               <Fragment key={d.id}>
-                <tr className={`hover:bg-accent/[0.03] transition ${snip ? 'border-b-0' : ''}`}>
+                <tr className={`hover:bg-accent/[0.03] transition ${isRowSelected(d.id) ? 'bg-accent/[0.04]' : ''} ${snip ? 'border-b-0' : ''}`}>
+                  {canBinder && (
+                    <td className="px-3 py-2.5">
+                      <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-accent focus:ring-accent align-middle"
+                        checked={isRowSelected(d.id)} onChange={() => toggleRow(d.id)} />
+                    </td>
+                  )}
                   <td className="px-3 py-2.5">
                     <button onClick={(e) => toggleBookmark(d, e)} title="Bookmark">
                       <Bookmark size={16} className={d.bookmarked ? 'fill-accent text-accent' : 'text-slate-300 hover:text-slate-400'} />
@@ -259,6 +362,7 @@ export default function CaseWorkspace() {
                 </tr>
                 {snip && (
                   <tr className="bg-slate-50/60">
+                    {canBinder && <td></td>}
                     <td></td>
                     <td colSpan={8} className="px-3 pb-2.5 pt-0 text-xs text-slate-500">
                       <Link to={`/cases/${caseId}/documents/${d.id}`} className="hover:text-accent-dark">
