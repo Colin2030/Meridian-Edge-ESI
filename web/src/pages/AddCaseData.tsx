@@ -6,6 +6,7 @@ import { fmtDateTime } from '../lib/format';
 import {
   ChevronLeft, UploadCloud, FileText, FileSpreadsheet, FileType2, FileArchive,
   X, CheckCircle2, AlertTriangle, Loader2, Info, History, ArrowRight,
+  Network, Server,
 } from 'lucide-react';
 
 interface CaseInfo { id: number; name: string; case_number: string; role: string; }
@@ -52,6 +53,12 @@ export default function AddCaseData() {
   const [denied, setDenied] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Network / folder location source
+  const [sourceTab, setSourceTab] = useState<'upload' | 'path'>('upload');
+  const [pathValue, setPathValue] = useState('');
+  const [pathName, setPathName] = useState('');
+  const [pathOcr, setPathOcr] = useState(false);
+  const [pathSubmitting, setPathSubmitting] = useState(false);
 
   useEffect(() => {
     api.get<CaseInfo>(`/api/cases/${caseId}`).then(setInfo).catch(() => {});
@@ -137,6 +144,26 @@ export default function AddCaseData() {
     xhr.send(fd);
   };
 
+  // Ingest from a server-reachable network / folder location (no browser upload).
+  const submitPath = async () => {
+    const p = pathValue.trim();
+    if (!p || pathSubmitting) return;
+    setErr(''); setJob(null); setPathSubmitting(true);
+    try {
+      const r = await api.post<{ importId: number; datFile: string; optFile: string | null }>(
+        `/api/cases/${caseId}/imports/path`,
+        { path: p, name: pathName.trim() || undefined, ocr: pathOcr },
+      );
+      setPathValue(''); setPathName(''); setPathOcr(false);
+      setJob({ id: r.importId, name: '', dat_filename: r.datFile, opt_filename: r.optFile, status: 'pending', phase: 'parsing', doc_count: 0, page_count: 0, error: null, source_kind: 'path', imported_at: new Date().toISOString(), imported_by_name: user?.displayName || null });
+      pollStatus(r.importId);
+    } catch (e: any) {
+      setErr(e?.message || 'The location could not be read by the server.');
+    } finally {
+      setPathSubmitting(false);
+    }
+  };
+
   if (denied) {
     return (
       <div className="mx-auto max-w-2xl px-5 py-16 text-center">
@@ -176,9 +203,31 @@ export default function AddCaseData() {
         </div>
       </div>
 
-      {/* Uploader */}
+      {/* Source selector */}
       {!job && (
-        <div className="card p-5 mt-4">
+        <>
+        <div className="mt-4 flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 w-fit">
+          <button
+            type="button"
+            onClick={() => { setSourceTab('upload'); setErr(''); }}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-sm font-medium transition ${sourceTab === 'upload' ? 'bg-white text-navy-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <UploadCloud size={15} /> Upload files
+          </button>
+          <button
+            type="button"
+            onClick={() => { setSourceTab('path'); setErr(''); }}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-sm font-medium transition ${sourceTab === 'path' ? 'bg-white text-navy-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <Network size={15} /> Network / folder location
+          </button>
+        </div>
+        </>
+      )}
+
+      {/* Uploader */}
+      {!job && sourceTab === 'upload' && (
+        <div className="card p-5 mt-3">
           <div
             onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
@@ -257,6 +306,69 @@ export default function AddCaseData() {
         </div>
       )}
 
+      {/* Network / folder location panel */}
+      {!job && sourceTab === 'path' && (
+        <div className="card p-5 mt-3">
+          <div className="flex gap-3">
+            <Server size={20} className="text-accent shrink-0 mt-0.5" />
+            <div className="text-sm text-slate-600 leading-relaxed">
+              <p className="font-semibold text-navy-900">Read a loadfile from a server location</p>
+              <p className="mt-1">
+                Point Meridian Edge at a folder the <strong>server</strong> can reach — a mounted network share
+                (NFS / SMB), or BLOB storage mounted as a path. The server reads the <strong>.DAT</strong>,
+                <strong> .OPT</strong> and page images directly from that location; nothing is uploaded through the browser.
+                Suitable for corporate deployments where processed data is placed on a share rather than uploaded.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <label className="label" htmlFor="ingest-path">Server path</label>
+            <input
+              id="ingest-path"
+              className="input font-mono text-sm"
+              placeholder="/mnt/esi-shares/operation-kingfisher"
+              value={pathValue}
+              onChange={(e) => { setPathValue(e.target.value); setErr(''); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') submitPath(); }}
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <p className="mt-1.5 text-xs text-slate-500">
+              An absolute path on the Meridian Edge server, for example
+              <span className="font-mono"> /mnt/esi-shares/operation-kingfisher</span> or
+              <span className="font-mono"> \\fileserver\esi\OperationKingfisher</span> once mounted. You may point to the
+              folder or directly to the <strong>.DAT</strong> file.
+            </p>
+          </div>
+
+          <div className="mt-4">
+            <label className="label" htmlFor="ingest-name">Set name <span className="font-normal text-slate-400">(optional)</span></label>
+            <input
+              id="ingest-name"
+              className="input"
+              placeholder="e.g. Operation Kingfisher — first production"
+              value={pathName}
+              onChange={(e) => setPathName(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+
+          <label className="mt-4 flex items-center gap-2 text-sm text-slate-600 select-none cursor-pointer">
+            <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-accent focus:ring-accent" checked={pathOcr} onChange={(e) => setPathOcr(e.target.checked)} />
+            Run OCR on page images without extracted text
+          </label>
+
+          {err && <div className="mt-4 rounded-md bg-rose-50 border border-rose-200 px-3 py-2 text-sm text-rose-700 flex items-center gap-2"><AlertTriangle size={16} /> {err}</div>}
+
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button className="btn-primary" disabled={!pathValue.trim() || pathSubmitting} onClick={submitPath}>
+              {pathSubmitting ? <><Loader2 size={16} className="animate-spin" /> Reading…</> : <><Network size={16} /> Import from location</>}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Live import progress */}
       {job && (
         <div className="card p-6 mt-4">
@@ -316,7 +428,7 @@ export default function AddCaseData() {
                     <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDateTime(h.imported_at)}</td>
                     <td className="px-3 py-2.5">
                       <div className="font-medium text-navy-900">{h.name}</div>
-                      <div className="text-xs text-slate-400">{h.dat_filename}{h.opt_filename ? ` + ${h.opt_filename}` : ''}{h.source_kind === 'zip' ? ' · from .zip' : ''}</div>
+                      <div className="text-xs text-slate-400">{h.dat_filename}{h.opt_filename ? ` + ${h.opt_filename}` : ''}{h.source_kind === 'zip' ? ' · from .zip' : ''}{h.source_kind === 'path' ? ' · from server location' : ''}</div>
                       {h.error && st !== 'failed' && <div className="text-xs text-amber-600 mt-0.5">{h.error}</div>}
                       {h.error && st === 'failed' && <div className="text-xs text-rose-600 mt-0.5">{h.error}</div>}
                     </td>

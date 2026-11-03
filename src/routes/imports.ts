@@ -65,6 +65,61 @@ function flattenImages(files: string[], imagesDir: string): { copied: number; co
   return { copied, collisions };
 }
 
+// ---- Server-side path validation (network / folder location source) ---------
+// Resolves symlinks and `..`, confirms the path exists and is readable, and
+// enforces that the *real* path sits within one of config.ingestAllowedRoots so
+// the server cannot be tricked into reading arbitrary files (e.g. /etc).
+type PathCheck =
+  | { ok: true; sourceRoot: string; datFileHint?: string }
+  | { ok: false; status: number; error: string };
+
+function validateIngestPath(input: string): PathCheck {
+  const raw = (input || '').trim();
+  if (!raw) return { ok: false, status: 400, error: 'Please provide a folder path on the server.' };
+  if (!path.isAbsolute(raw)) {
+    return { ok: false, status: 400, error: 'The path must be an absolute path (for example /mnt/esi-shares/operation-kingfisher).' };
+  }
+
+  // Normalise and resolve the real path (follows symlinks, collapses `..`).
+  let real: string;
+  try {
+    real = fs.realpathSync(path.resolve(raw));
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return { ok: false, status: 400, error: 'Path not found. Check the location exists and is mounted on the Meridian Edge server.' };
+    if (e?.code === 'EACCES') return { ok: false, status: 400, error: 'Path not readable by the server. Check the mount permissions for the Meridian Edge service account.' };
+    return { ok: false, status: 400, error: 'That path could not be read by the server.' };
+  }
+
+  // Security: the resolved real path must be inside an allowed root.
+  const roots = config.ingestAllowedRoots;
+  const allowed = roots.some((root) => real === root || real.startsWith(root + path.sep));
+  if (!allowed) {
+    return { ok: false, status: 400, error: 'That location is not within an allowed ingest root. Ask an administrator to add it to INGEST_ALLOWED_ROOTS.' };
+  }
+
+  // Confirm readability and whether it is a file or directory.
+  let stat: fs.Stats;
+  try {
+    fs.accessSync(real, fs.constants.R_OK);
+    stat = fs.statSync(real);
+  } catch (e: any) {
+    if (e?.code === 'EACCES') return { ok: false, status: 400, error: 'Path not readable by the server. Check the mount permissions for the Meridian Edge service account.' };
+    return { ok: false, status: 400, error: 'Path not found or not readable by the server.' };
+  }
+
+  if (stat.isDirectory()) {
+    return { ok: true, sourceRoot: real };
+  }
+  if (stat.isFile()) {
+    // A direct path to a .DAT (or any file) — use its parent dir as the source root.
+    if (path.extname(real).toLowerCase() === '.dat') {
+      return { ok: true, sourceRoot: path.dirname(real), datFileHint: real };
+    }
+    return { ok: true, sourceRoot: path.dirname(real) };
+  }
+  return { ok: false, status: 400, error: 'The path is neither a folder nor a file the server can read.' };
+}
+
 // ---- Background job: run the existing ingest pipeline ------------------------
 function startIngestJob(args: {
   importId: number; caseId: number; datPath: string; optPath?: string; imagesDir: string;
@@ -194,6 +249,81 @@ router.post('/:caseId/imports', requireAuth, requireCaseRole('case_manager'), up
     imageCount: copied,
     collisions,
   });
+});
+
+// ---- POST /api/cases/:caseId/imports/path — ingest from a network/folder location
+// RBAC identical to the upload route (case_manager or above; system_admin global).
+// Reads an already-processed Concordance loadfile from a server-reachable path
+// (mounted SMB/NFS share or BLOB storage mounted as a path) instead of a browser
+// upload. Reuses the exact same walk/flattenImages/startIngestJob pipeline.
+router.post('/:caseId/imports/path', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
+  const caseId = parseInt(req.params.caseId, 10);
+
+  // 1. Validate the server-side path (absolute, exists, readable, within an allowed root).
+  const check = validateIngestPath(req.body?.path);
+  if (!check.ok) {
+    return res.status(check.status).json({ error: check.error });
+  }
+  const { sourceRoot, datFileHint } = check;
+
+  // 2. Local staging dir so copied images live on local disk for rendering.
+  const stageDir = path.join(IMPORTS_ROOT, String(caseId), `_incoming_path_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  fs.mkdirSync(stageDir, { recursive: true });
+  const cleanup = () => { try { fs.rmSync(stageDir, { recursive: true, force: true }); } catch { /* ignore */ } };
+
+  try {
+    // 3. Walk the source location and locate the loadfile (reuse existing helpers).
+    const allFiles = walk(sourceRoot);
+    const datFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.dat');
+    const optFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.opt');
+
+    const datPath = datFileHint || (datFiles.length ? datFiles[0] : undefined);
+    if (!datPath) {
+      cleanup();
+      return res.status(400).json({ error: 'No .DAT loadfile found at that location. A Concordance .DAT metadata file is required.' });
+    }
+    const optPath = optFiles.length ? optFiles[0] : undefined;
+
+    // 4. Copy TIFF/PDF images into local _images/ so rendering reads from local disk.
+    const imagesDir = path.join(stageDir, '_images');
+    const { copied, collisions } = flattenImages(allFiles, imagesDir);
+
+    const ocr = req.body?.ocr === true || req.body?.ocr === 'true' || config.enableOcr;
+    const setName = (req.body?.name as string)?.trim() || path.basename(datPath);
+
+    // 5. Record the import (source_kind='path', original_files holds the source path for audit/UI).
+    const ins = await query<{ id: number }>(
+      `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, status, phase, source_kind, original_files)
+       VALUES ($1,$2,$3,$4,$5,'pending','parsing',$6,$7) RETURNING id`,
+      [caseId, setName, path.basename(datPath), optPath ? path.basename(optPath) : null, req.user!.id, 'path', JSON.stringify([{ path: sourceRoot, dat: path.basename(datPath) }])]
+    );
+    const importId = ins.rows[0].id;
+
+    await audit({
+      userId: req.user!.id, caseId, action: 'import.started',
+      target: `import:${importId}`,
+      detail: `${setName} — network/folder location "${sourceRoot}" — DAT=${path.basename(datPath)}${optPath ? ', OPT=' + path.basename(optPath) : ', no OPT'}, ${copied} image file(s)${collisions.length ? ', ' + collisions.length + ' name collision(s) skipped' : ''}`,
+    });
+
+    // 6. Kick the SAME background ingest job used by the upload route.
+    startIngestJob({
+      importId, caseId, datPath, optPath, imagesDir,
+      importedBy: req.user!.id, setName, ocr,
+    });
+
+    return res.status(202).json({
+      importId,
+      status: 'pending',
+      datFile: path.basename(datPath),
+      optFile: optPath ? path.basename(optPath) : null,
+      imageCount: copied,
+      collisions,
+      sourceKind: 'path',
+    });
+  } catch (e: any) {
+    cleanup();
+    return res.status(400).json({ error: 'That location could not be read by the server.' });
+  }
 });
 
 // ---- GET /api/cases/:caseId/imports/:importId — status ----------------------

@@ -10,6 +10,17 @@ export const config = {
   enableOcr: (process.env.ENABLE_OCR || 'false').toLowerCase() === 'true',
   uploadsDir: path.resolve(process.cwd(), 'uploads'),
   webDist: path.resolve(process.cwd(), 'web', 'dist'),
+  // Server-side ingest from a network/folder location (mounted SMB/NFS share or
+  // BLOB storage mounted as a path). Only paths *within* one of these absolute
+  // roots may be read, to prevent arbitrary filesystem reads. Override in
+  // production via INGEST_ALLOWED_ROOTS (comma-separated absolute paths), e.g.
+  //   INGEST_ALLOWED_ROOTS=/mnt/esi-shares,/srv/esi
+  // Defaults cover the usual mount points for dev and typical deployments.
+  ingestAllowedRoots: (process.env.INGEST_ALLOWED_ROOTS || '/home/ubuntu,/mnt,/media,/srv')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => path.resolve(p)),
 };
 if (!config.databaseUrl) {
   // eslint-disable-next-line no-console
