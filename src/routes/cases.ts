@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import ExcelJS from 'exceljs';
 import { query } from '../db';
 import { audit } from '../lib/audit';
 import { AuthedRequest, requireAuth, requireCaseRole, getCaseRole } from '../middleware/auth';
@@ -413,6 +414,186 @@ router.get('/:caseId/audit/export.csv', requireAuth, requireCaseRole('case_manag
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+});
+
+// ============================================================================
+// REPORT BUILDER — production-request document list, filtered by applied tags
+// ============================================================================
+// Purpose: a reviewer builds a list of documents keyed on Doc ID (control
+// number) from the tags they have applied (e.g. everything tagged 'Relevant')
+// and sends it to the forensics / eDiscovery team to produce the native files.
+// This is a reporting feature over already-reviewed data — it does not process
+// or alter ESI.
+
+interface ReportRow {
+  docName: string; docId: string; doctype: string; custodian: string; comments: string; tags: string;
+}
+
+// Resolve the ?tags= parameter (comma-separated tag ids OR names) to the tag ids
+// that actually belong to this case. Returns the resolved ids and their names.
+async function resolveReportTags(caseId: number, tagsParam: string | undefined): Promise<{ ids: number[]; names: string[] }> {
+  const raw = (tagsParam || '').trim();
+  if (!raw) return { ids: [], names: [] };
+  const tokens = raw.split(',').map((t) => t.trim()).filter(Boolean);
+  if (!tokens.length) return { ids: [], names: [] };
+
+  const caseTags = (await query<{ id: number; name: string }>(
+    `SELECT id, name FROM tags WHERE case_id=$1`, [caseId]
+  )).rows;
+  const byId = new Map(caseTags.map((t) => [t.id, t]));
+  const byName = new Map(caseTags.map((t) => [t.name.toLowerCase(), t]));
+
+  const ids: number[] = [];
+  const names: string[] = [];
+  for (const tok of tokens) {
+    let match: { id: number; name: string } | undefined;
+    if (/^\d+$/.test(tok)) match = byId.get(parseInt(tok, 10));
+    if (!match) match = byName.get(tok.toLowerCase());
+    if (match && !ids.includes(match.id)) { ids.push(match.id); names.push(match.name); }
+  }
+  return { ids, names };
+}
+
+// Build the report rows for a case, optionally filtered by tag ids / match mode.
+async function buildReportRows(caseId: number, tagIds: number[], match: 'any' | 'all'): Promise<ReportRow[]> {
+  const params: any[] = [caseId];
+  let filterSql = '';
+  if (tagIds.length) {
+    params.push(tagIds);
+    const tagsIdx = params.length; // $2
+    if (match === 'all') {
+      params.push(tagIds.length);
+      const cntIdx = params.length; // $3
+      filterSql = `AND (SELECT count(DISTINCT dt.tag_id) FROM document_tags dt
+                         WHERE dt.document_id = d.id AND dt.tag_id = ANY($${tagsIdx}::int[])) = $${cntIdx}`;
+    } else {
+      filterSql = `AND EXISTS (SELECT 1 FROM document_tags dt
+                                WHERE dt.document_id = d.id AND dt.tag_id = ANY($${tagsIdx}::int[]))`;
+    }
+  }
+
+  // Doc Name: prefer metadata FILENAME, then SUBJECT, then control_number.
+  // Comments: "<author>: <text>" for every comment, oldest first, joined by "; ".
+  // Tags: ALL tag names applied to the document (not just the selected ones).
+  const sql = `
+    SELECT d.control_number AS doc_id,
+           COALESCE(NULLIF(d.metadata->>'FILENAME',''), NULLIF(d.metadata->>'SUBJECT',''), d.control_number) AS doc_name,
+           COALESCE(d.metadata->>'DOCTYPE','') AS doctype,
+           COALESCE(d.metadata->>'CUSTODIAN','') AS custodian,
+           COALESCE((SELECT string_agg(u.display_name || ': ' || c.body, '; ' ORDER BY c.created_at, c.id)
+                       FROM comments c JOIN users u ON u.id = c.user_id
+                      WHERE c.document_id = d.id), '') AS comments,
+           COALESCE((SELECT string_agg(t.name, ', ' ORDER BY t.name)
+                       FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
+                      WHERE dt.document_id = d.id), '') AS tags
+      FROM documents d
+     WHERE d.case_id = $1
+       ${filterSql}
+     ORDER BY d.control_number ASC`;
+
+  const { rows } = await query<any>(sql, params);
+  return rows.map((r) => ({
+    docName: r.doc_name || '', docId: r.doc_id || '', doctype: r.doctype || '',
+    custodian: r.custodian || '', comments: r.comments || '', tags: r.tags || '',
+  }));
+}
+
+// The six report columns, in the required order.
+const REPORT_HEADERS = ['Doc Name', 'Doc ID', 'DOCTYPE', 'Custodian', 'Comments', 'Tags'];
+
+// List the case's tags with a per-tag applied-document count, for the report
+// builder UI (so it can show "Relevant (12)"). Any case member may read.
+router.get('/:caseId/reports/tags', requireAuth, requireCaseRole('read_only'), async (req: AuthedRequest, res) => {
+  const caseId = (req as any).caseId;
+  const { rows } = await query<any>(
+    `SELECT t.id, t.name, t.colour, t.parent_id,
+            (SELECT count(*)::int FROM document_tags dt JOIN documents d ON d.id = dt.document_id
+              WHERE dt.tag_id = t.id AND d.case_id = $1) AS doc_count
+       FROM tags t WHERE t.case_id = $1
+      ORDER BY t.name`, [caseId]
+  );
+  const total = (await query<any>(`SELECT count(*)::int AS n FROM documents WHERE case_id=$1`, [caseId])).rows[0].n;
+  res.json({ tags: rows, totalDocuments: total });
+});
+
+// Export the production-request document list, filtered by applied tags.
+// RBAC: reviewer or above (the intended users; case_manager/admin inherit).
+// Query: ?tags=<id|name,...>&match=any|all&format=csv|xlsx
+router.get('/:caseId/reports/documents', requireAuth, requireCaseRole('reviewer'), async (req: AuthedRequest, res) => {
+  const caseId = (req as any).caseId;
+  const fmtRaw = String(req.query.format || 'csv').toLowerCase();
+  const format: 'csv' | 'xlsx' | 'json' = fmtRaw === 'xlsx' ? 'xlsx' : fmtRaw === 'json' ? 'json' : 'csv';
+  const match: 'any' | 'all' = String(req.query.match || 'any').toLowerCase() === 'all' ? 'all' : 'any';
+
+  // Resolve the tag filter. If a tags param was supplied but matched no real
+  // tags in the case, that is a client error (avoid silently exporting all docs).
+  const tagsParam = req.query.tags as string | undefined;
+  const { ids: tagIds, names: tagNames } = await resolveReportTags(caseId, tagsParam);
+  if (tagsParam && tagsParam.trim() && tagIds.length === 0) {
+    return res.status(400).json({ error: 'None of the requested tags exist in this case.' });
+  }
+
+  const rows = await buildReportRows(caseId, tagIds, match);
+
+  // JSON preview — used by the report builder UI to show an accurate document
+  // count (and a small preview) before exporting. Not a file export, so it is
+  // NOT recorded as a report.exported audit event.
+  if (format === 'json') {
+    return res.json({ count: rows.length, columns: REPORT_HEADERS, rows });
+  }
+
+  // Case number for the filename (fall back to the id).
+  const caseRow = (await query<any>(`SELECT case_number FROM cases WHERE id=$1`, [caseId])).rows[0];
+  const caseRef = (caseRow?.case_number || String(caseId)).replace(/[^A-Za-z0-9._-]+/g, '-');
+  const ymd = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const base = `production-list-${caseRef}-${ymd}`;
+
+  const filterLabel = tagIds.length
+    ? `tags [${tagNames.join(', ')}] (match ${match})`
+    : 'all documents (no tag filter)';
+
+  // Record the export — it is a forensic product.
+  await audit({
+    userId: req.user!.id, caseId, action: 'report.exported',
+    target: `case:${caseId}`,
+    detail: `Production list — ${filterLabel}, format ${format.toUpperCase()}, ${rows.length} document(s)`,
+  });
+
+  if (format === 'xlsx') {
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Meridian Edge';
+    wb.created = new Date();
+    const ws = wb.addWorksheet('Document List', { views: [{ state: 'frozen', ySplit: 1 }] });
+    ws.columns = [
+      { header: 'Doc Name', key: 'docName', width: 40 },
+      { header: 'Doc ID', key: 'docId', width: 16 },
+      { header: 'DOCTYPE', key: 'doctype', width: 14 },
+      { header: 'Custodian', key: 'custodian', width: 22 },
+      { header: 'Comments', key: 'comments', width: 60 },
+      { header: 'Tags', key: 'tags', width: 26 },
+    ];
+    const headerRow = ws.getRow(1);
+    headerRow.font = { bold: true };
+    headerRow.alignment = { vertical: 'middle' };
+    for (const r of rows) ws.addRow(r);
+    // Wrap the free-text comments column for readability.
+    ws.getColumn('comments').alignment = { wrapText: true, vertical: 'top' };
+
+    const buf = await wb.xlsx.writeBuffer();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${base}.xlsx"`);
+    return res.send(Buffer.from(buf));
+  }
+
+  // CSV — same conventions as the audit export (BOM, CRLF, RFC-4180 escaping).
+  const lines: string[] = [REPORT_HEADERS.map(csvField).join(',')];
+  for (const r of rows) {
+    lines.push([r.docName, r.docId, r.doctype, r.custodian, r.comments, r.tags].map(csvField).join(','));
+  }
+  const csv = '\uFEFF' + lines.join('\r\n') + '\r\n';
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${base}.csv"`);
   res.send(csv);
 });
 

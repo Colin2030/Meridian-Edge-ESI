@@ -2,9 +2,10 @@ import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDate, reviewMeta, REVIEW_STATES } from '../lib/format';
-import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks } from 'lucide-react';
+import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks, ClipboardList } from 'lucide-react';
 import { CaseAdminPanel } from '../components/CaseAdminPanel';
 import { KeywordListPanel, KwOptions } from '../components/KeywordListPanel';
+import { ReportBuilder } from '../components/ReportBuilder';
 
 interface Tag { id: number; name: string; colour: string; }
 interface CaseInfo { id: number; name: string; case_number: string; description: string; role: string; tags: Tag[]; statusCounts: { status: string; n: number }[]; }
@@ -23,6 +24,7 @@ export default function CaseWorkspace() {
   const [loading, setLoading] = useState(true);
   const [searchParams] = useSearchParams();
   const [showAdmin, setShowAdmin] = useState(searchParams.get('settings') === '1');
+  const [showReport, setShowReport] = useState(false);
 
   // search mode: 'fulltext' (default, tsvector) or 'pattern' (GREP/regex)
   const [mode, setMode] = useState<'fulltext' | 'pattern'>('fulltext');
@@ -78,6 +80,7 @@ export default function CaseWorkspace() {
   const resetFilters = () => { setQ(''); setStatus(''); setTagId(''); setDateFrom(''); setDateTo(''); setBookmarked(false); setPage(0); };
   const activeFilters = [status, tagId, dateFrom, dateTo].filter(Boolean).length + (bookmarked ? 1 : 0);
   const canManage = info?.role === 'system_admin' || info?.role === 'case_manager';
+  const canReport = canManage || info?.role === 'reviewer';
 
   // Jump from the keyword-list report to a filtered document list for one term.
   const selectKeywordTerm = (term: string, opts: KwOptions) => {
@@ -104,16 +107,27 @@ export default function CaseWorkspace() {
           <h1 className="text-2xl font-bold text-navy-900 mt-1">{info?.name || 'Loading…'}</h1>
           <p className="text-sm text-slate-500">{info?.case_number} · {total} documents · your role: <span className="font-medium text-slate-700">{(info?.role || '').replace('_', ' ')}</span></p>
         </div>
-        {canManage && (
+        {(canReport || canManage) && (
           <div className="flex items-center gap-2">
-            <Link to={`/cases/${caseId}/import`} className="btn-primary"><UploadCloud size={16} /> Add case data</Link>
-            <button onClick={() => setShowAdmin((s) => !s)} className="btn-outline"><Settings2 size={16} /> Case settings</button>
+            {canReport && (
+              <button onClick={() => setShowReport(true)} className="btn-outline"><ClipboardList size={16} /> Build report</button>
+            )}
+            {canManage && (
+              <>
+                <Link to={`/cases/${caseId}/import`} className="btn-primary"><UploadCloud size={16} /> Add case data</Link>
+                <button onClick={() => setShowAdmin((s) => !s)} className="btn-outline"><Settings2 size={16} /> Case settings</button>
+              </>
+            )}
           </div>
         )}
       </div>
 
       {showAdmin && canManage && info && (
         <CaseAdminPanel caseId={info.id} tags={info.tags} onClose={() => setShowAdmin(false)} onChange={() => api.get<CaseInfo>(`/api/cases/${caseId}`).then(setInfo)} />
+      )}
+
+      {showReport && info && (
+        <ReportBuilder caseId={info.id} caseName={`${info.name} · ${info.case_number}`} onClose={() => setShowReport(false)} />
       )}
 
       {/* status summary chips */}
