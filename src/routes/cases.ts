@@ -358,4 +358,62 @@ router.get('/:caseId/audit', requireAuth, requireCaseRole('case_manager'), async
   res.json(rows);
 });
 
+// ---- CSV escaping helper ----------------------------------------------------
+// Quote any field containing a comma, double-quote, CR or LF; double embedded quotes.
+function csvField(value: unknown): string {
+  const s = value === null || value === undefined ? '' : String(value);
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+// Audit log CSV export (same RBAC as the audit view). Exports the FULL set of
+// audit entries for the case (no pagination limit) so the export is complete for
+// forensic purposes. The export is itself recorded as an auditable event.
+router.get('/:caseId/audit/export.csv', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
+  const caseId = (req as any).caseId;
+
+  // Case number for the filename (fall back to the id).
+  const caseRow = (await query<any>(`SELECT case_number FROM cases WHERE id=$1`, [caseId])).rows[0];
+  const caseRef = (caseRow?.case_number || String(caseId)).replace(/[^A-Za-z0-9._-]+/g, '-');
+
+  // Same selection/ordering as the audit view, but without the LIMIT so the
+  // whole filtered result set is exported.
+  const { rows } = await query<any>(
+    `SELECT a.created_at, a.action, a.target, a.detail, u.display_name, u.username
+       FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.case_id = $1 ORDER BY a.created_at DESC`, [caseId]
+  );
+
+  const header = ['Timestamp (UTC)', 'User', 'Username', 'Action', 'Target', 'Detail'];
+  const lines: string[] = [header.map(csvField).join(',')];
+  for (const r of rows) {
+    const ts = r.created_at ? new Date(r.created_at).toISOString() : '';
+    lines.push([
+      csvField(ts),
+      csvField(r.display_name || ''),
+      csvField(r.username || ''),
+      csvField(r.action || ''),
+      csvField(r.target || ''),
+      csvField(r.detail || ''),
+    ].join(','));
+  }
+  // CRLF line endings for maximum spreadsheet compatibility; UTF-8 BOM so Excel
+  // detects the encoding.
+  const csv = '\uFEFF' + lines.join('\r\n') + '\r\n';
+
+  const ymd = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const filename = `audit-log-${caseRef}-${ymd}.csv`;
+
+  // Exporting the audit trail is itself an auditable event.
+  await audit({
+    userId: req.user!.id, caseId, action: 'audit.exported',
+    target: `case:${caseId}`,
+    detail: `Exported ${rows.length} audit entr${rows.length === 1 ? 'y' : 'ies'} as CSV (${filename})`,
+  });
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
+});
+
 export default router;

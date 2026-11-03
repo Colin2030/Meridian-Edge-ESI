@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { fmtDateTime } from '../lib/format';
-import { X, UserPlus, Tag as TagIcon, ScrollText, Trash2, Plus, CornerDownRight } from 'lucide-react';
+import { X, UserPlus, Tag as TagIcon, ScrollText, Trash2, Plus, CornerDownRight, Download } from 'lucide-react';
 
 interface Tag { id: number; name: string; colour: string; parent_id?: number | null; }
 interface Member { user_id: number; role: string; username: string; display_name: string; email: string; }
@@ -187,7 +187,18 @@ export function CaseAdminPanel({ caseId, tags, onClose, onChange }: { caseId: nu
       )}
 
       {tab === 'audit' && (
-        <div className="max-h-96 overflow-auto">
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-xs text-slate-500">Forensic audit trail for this case.</p>
+            <a
+              href={`/api/cases/${caseId}/audit/export.csv`}
+              className="btn-outline inline-flex items-center gap-1.5 text-sm"
+              title="Download the audit trail as a CSV file"
+            >
+              <Download size={15} /> Export CSV
+            </a>
+          </div>
+          <div className="max-h-96 overflow-auto">
           <table className="w-full text-sm">
             <thead><tr className="text-left text-xs uppercase text-slate-500 sticky top-0 bg-white"><th className="py-2">When</th><th>User</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
             <tbody className="divide-y divide-slate-100">
@@ -199,6 +210,7 @@ export function CaseAdminPanel({ caseId, tags, onClose, onChange }: { caseId: nu
               {audit.length === 0 && <tr><td colSpan={5} className="py-6 text-center text-slate-400">No audit entries.</td></tr>}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>
