@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { api } from './api';
 
-export interface User { id: number; username: string; displayName: string; email?: string; isSystemAdmin: boolean; }
+export interface User { id: number; username: string; displayName: string; email?: string; isSystemAdmin: boolean; canCreateCases?: boolean; }
 
 interface AuthCtx {
   user: User | null;

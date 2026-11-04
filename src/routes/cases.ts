@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import ExcelJS from 'exceljs';
-import { query } from '../db';
+import { query, withTx } from '../db';
 import { audit } from '../lib/audit';
-import { AuthedRequest, requireAuth, requireCaseRole, getCaseRole } from '../middleware/auth';
+import { AuthedRequest, requireAuth, requireCaseRole, getCaseRole, requireCanCreateCases } from '../middleware/auth';
 
 const router = Router();
 
@@ -30,6 +30,33 @@ router.get('/', requireAuth, async (req: AuthedRequest, res) => {
     out.push({ ...c, role });
   }
   res.json(out);
+});
+
+// Create a case. Open to system administrators (always) and to any user granted
+// the global `can_create_cases` capability. A non-admin creator is automatically
+// enrolled as the case_manager of the new case so they can immediately add data
+// and manage it. System admins already see every case, so a membership row is
+// not required for them, but we add one anyway when they are not already a member
+// — it is harmless and keeps the "creator manages their case" invariant simple.
+router.post('/', requireAuth, requireCanCreateCases, async (req: AuthedRequest, res) => {
+  const { name, caseNumber, description } = req.body || {};
+  if (!name || !String(name).trim()) return res.status(400).json({ error: 'name required' });
+  const created = await withTx(async (q) => {
+    const { rows } = await q(
+      `INSERT INTO cases (name, case_number, description, created_by) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [String(name).trim(), caseNumber || null, description || null, req.user!.id]
+    );
+    const row = rows[0];
+    // Make the creator a case_manager of their new case (idempotent).
+    await q(
+      `INSERT INTO case_memberships (user_id, case_id, role) VALUES ($1,$2,'case_manager')
+       ON CONFLICT (user_id, case_id) DO NOTHING`,
+      [req.user!.id, row.id]
+    );
+    return row;
+  });
+  await audit({ userId: req.user!.id, caseId: created.id, action: 'case_created', target: created.name });
+  res.status(201).json(created);
 });
 
 // Case detail

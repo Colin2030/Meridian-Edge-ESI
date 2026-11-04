@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { Users, FolderPlus, Plus, ShieldCheck, UserCog, Pencil, Trash2, X, AlertTriangle, KeyRound, Power, Shield, Copy, Check } from 'lucide-react';
 
-interface SysUser { id: number; username: string; email: string; display_name: string; is_system_admin: boolean; active: boolean; created_at: string; }
+interface SysUser { id: number; username: string; email: string; display_name: string; is_system_admin: boolean; can_create_cases: boolean; active: boolean; created_at: string; }
 interface CaseRow { id: number; name: string; case_number: string | null; description: string | null; status: string; }
 
 export default function Admin() {
@@ -72,7 +72,12 @@ export default function Admin() {
                   <tr key={u.id} className={u.active ? '' : 'bg-slate-50/60'}>
                     <td className="px-4 py-3"><div className="font-medium text-navy-900">{u.display_name}</div><div className="text-xs text-slate-400">{u.email || '—'}</div></td>
                     <td className="text-slate-600">{u.username}</td>
-                    <td>{u.is_system_admin ? <span className="badge bg-navy-900 text-white">System admin</span> : <span className="badge bg-slate-100 text-slate-600">Standard</span>}</td>
+                    <td>
+                      <div className="flex flex-wrap items-center gap-1">
+                        {u.is_system_admin ? <span className="badge bg-navy-900 text-white">System admin</span> : <span className="badge bg-slate-100 text-slate-600">Standard</span>}
+                        {!u.is_system_admin && u.can_create_cases && <span className="badge bg-accent/15 text-accent-dark" title="May create cases">Can create cases</span>}
+                      </div>
+                    </td>
                     <td>{u.active ? <span className="badge bg-emerald-100 text-emerald-700">Active</span> : <span className="badge bg-rose-100 text-rose-700">Inactive</span>}</td>
                     <td className="pr-4">
                       <div className="flex items-center justify-end gap-1">
@@ -339,6 +344,14 @@ function EditUserModal({ user, cases, onClose, onChanged }: { user: SysUser; cas
     } catch (e: any) { fail(e); } finally { setBusy(false); }
   };
 
+  const toggleCanCreateCases = async () => {
+    setBusy(true); setErr(''); setMsg('');
+    try {
+      const u = await api.put<SysUser>(`/api/admin/users/${user.id}/can-create-cases`, { value: !user.can_create_cases });
+      onChanged(u); flash(u.can_create_cases ? 'This user can now create cases.' : 'Case-creation permission removed.');
+    } catch (e: any) { fail(e); } finally { setBusy(false); }
+  };
+
   const toggleActive = async () => {
     if (!confirm(user.active ? `Deactivate ${user.display_name}? They will be unable to log in.` : `Reactivate ${user.display_name}?`)) return;
     setBusy(true); setErr(''); setMsg('');
@@ -429,6 +442,17 @@ function EditUserModal({ user, cases, onClose, onChanged }: { user: SysUser; cas
               {user.active ? <span className="badge bg-emerald-100 text-emerald-700">Active</span> : <span className="badge bg-rose-100 text-rose-700">Inactive</span>}
               <button type="button" onClick={toggleActive} className="btn-ghost text-xs text-slate-600 flex items-center gap-1" disabled={busy}><Power size={13} /> {user.active ? 'Deactivate' : 'Activate'}</button>
             </div>
+          </div>
+          <div className="mt-3 flex items-center gap-2 text-sm border-t border-slate-100 pt-3">
+            <span className="text-slate-600">Can create cases:</span>
+            {user.is_system_admin ? (
+              <span className="badge bg-slate-100 text-slate-500" title="System administrators can always create cases">Always (system admin)</span>
+            ) : (
+              <>
+                {user.can_create_cases ? <span className="badge bg-accent/15 text-accent-dark">Yes</span> : <span className="badge bg-slate-100 text-slate-600">No</span>}
+                <button type="button" onClick={toggleCanCreateCases} className="btn-ghost text-xs text-accent-dark" disabled={busy}>{user.can_create_cases ? 'Revoke' : 'Grant'}</button>
+              </>
+            )}
           </div>
         </div>
 

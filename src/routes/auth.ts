@@ -29,7 +29,7 @@ router.post('/login', async (req, res) => {
     maxAge: 12 * 3600 * 1000,
   });
   await audit({ userId: u.id, action: 'login', target: u.username });
-  res.json({ id: u.id, username: u.username, displayName: u.display_name, isSystemAdmin: u.is_system_admin });
+  res.json({ id: u.id, username: u.username, displayName: u.display_name, isSystemAdmin: u.is_system_admin, canCreateCases: u.can_create_cases });
 });
 
 router.post('/logout', requireAuth, async (req: AuthedRequest, res) => {
@@ -39,10 +39,10 @@ router.post('/logout', requireAuth, async (req: AuthedRequest, res) => {
 });
 
 router.get('/me', requireAuth, async (req: AuthedRequest, res) => {
-  const { rows } = await query<any>(`SELECT id, username, email, display_name, is_system_admin FROM users WHERE id=$1`, [req.user!.id]);
+  const { rows } = await query<any>(`SELECT id, username, email, display_name, is_system_admin, can_create_cases FROM users WHERE id=$1`, [req.user!.id]);
   if (!rows.length) return res.status(401).json({ error: 'User not found' });
   const u = rows[0];
-  res.json({ id: u.id, username: u.username, email: u.email, displayName: u.display_name, isSystemAdmin: u.is_system_admin });
+  res.json({ id: u.id, username: u.username, email: u.email, displayName: u.display_name, isSystemAdmin: u.is_system_admin, canCreateCases: u.can_create_cases });
 });
 
 export default router;

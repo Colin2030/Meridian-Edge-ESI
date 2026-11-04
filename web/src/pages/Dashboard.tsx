@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { fmtDate } from '../lib/format';
-import { FolderOpen, FileText, CheckCircle2, Bookmark, ArrowRight, ShieldCheck } from 'lucide-react';
+import { FolderOpen, FileText, CheckCircle2, Bookmark, ArrowRight, ShieldCheck, FolderPlus, Plus, X } from 'lucide-react';
 
 interface CaseRow {
   id: number; name: string; case_number: string; description: string; status: string; created_at: string;
@@ -22,6 +22,9 @@ export default function Dashboard() {
   const { user } = useAuth();
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+
+  const canCreate = !!(user?.isSystemAdmin || user?.canCreateCases);
 
   useEffect(() => { api.get<CaseRow[]>('/api/cases').then(setCases).finally(() => setLoading(false)); }, []);
 
@@ -32,10 +35,17 @@ export default function Dashboard() {
           <h1 className="text-2xl font-bold text-navy-900">Cases</h1>
           <p className="text-sm text-slate-500 mt-1">Investigations you have been granted access to.</p>
         </div>
-        {user?.isSystemAdmin && (
-          <Link to="/admin" className="btn-outline"><ShieldCheck size={16} /> Manage cases & users</Link>
-        )}
+        <div className="flex items-center gap-2">
+          {canCreate && (
+            <button onClick={() => setCreating(true)} className="btn-primary"><FolderPlus size={16} /> New case</button>
+          )}
+          {user?.isSystemAdmin && (
+            <Link to="/admin" className="btn-outline"><ShieldCheck size={16} /> Manage cases & users</Link>
+          )}
+        </div>
       </div>
+
+      {creating && <NewCaseModal onClose={() => setCreating(false)} />}
 
       {loading ? (
         <div className="text-slate-400 py-20 text-center">Loading cases…</div>
@@ -86,6 +96,51 @@ export default function Dashboard() {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+// Create-case modal, shown to system admins and users granted the global
+// "can create cases" capability. Posts to /api/cases (which both roles may use)
+// and navigates the creator into their new case, where they are now the
+// case manager and can add data.
+function NewCaseModal({ onClose }: { onClose: () => void }) {
+  const nav = useNavigate();
+  const [name, setName] = useState('');
+  const [caseNumber, setCaseNumber] = useState('');
+  const [description, setDescription] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) { setErr('Case name is required.'); return; }
+    setBusy(true); setErr('');
+    try {
+      const c = await api.post<{ id: number }>('/api/cases', { name: name.trim(), caseNumber: caseNumber.trim(), description: description.trim() });
+      nav(`/cases/${c.id}`);
+    } catch (e: any) { setErr(e?.message || 'Could not create the case.'); setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal-950/60 p-4" onClick={onClose}>
+      <form onClick={(e) => e.stopPropagation()} onSubmit={submit} className="w-full max-w-md card p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold text-navy-900 flex items-center gap-2"><FolderPlus size={18} className="text-accent" /> New case</h3>
+          <button type="button" onClick={onClose} className="btn-ghost"><X size={16} /></button>
+        </div>
+        <p className="text-xs text-slate-500 mb-4">You will become the case manager of this case and can add data to it straight away.</p>
+        {err && <div className="mb-3 rounded-md bg-rose-50 border border-rose-200 px-3 py-2 text-sm text-rose-700">{err}</div>}
+        <div className="space-y-3">
+          <div><label className="label">Case name</label><input className="input" value={name} onChange={(e) => setName(e.target.value)} autoFocus required /></div>
+          <div><label className="label">Reference / number</label><input className="input" value={caseNumber} onChange={(e) => setCaseNumber(e.target.value)} placeholder="optional" /></div>
+          <div><label className="label">Description</label><textarea className="input" rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="optional" /></div>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn-ghost" disabled={busy}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={busy}><Plus size={15} /> {busy ? 'Creating…' : 'Create case'}</button>
+        </div>
+      </form>
     </div>
   );
 }

@@ -36,6 +36,25 @@ export function requireSystemAdmin(req: AuthedRequest, res: Response, next: Next
   next();
 }
 
+// Allows the request only if the user may create cases: either a system
+// administrator (implicitly always permitted) or a user whose global
+// `can_create_cases` flag is set. Used to gate case creation, which is a global
+// action and cannot be scoped by a per-case role.
+export async function requireCanCreateCases(req: AuthedRequest, res: Response, next: NextFunction) {
+  if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+  if (req.user.isSystemAdmin) return next();
+  try {
+    const { rows } = await query<{ can_create_cases: boolean }>(
+      `SELECT can_create_cases FROM users WHERE id=$1`,
+      [req.user.id]
+    );
+    if (rows.length && rows[0].can_create_cases) return next();
+    return res.status(403).json({ error: 'You do not have permission to create cases' });
+  } catch (e) {
+    next(e);
+  }
+}
+
 export type CaseRole = 'case_manager' | 'reviewer' | 'read_only';
 
 // Returns the effective role of the user within a case, or null if no access.

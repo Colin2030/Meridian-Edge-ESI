@@ -12,7 +12,7 @@ const router = Router();
 // List all users (system admin)
 router.get('/users', requireAuth, requireSystemAdmin, async (_req, res) => {
   const { rows } = await query<any>(
-    `SELECT id, username, email, display_name, is_system_admin, active, created_at FROM users ORDER BY display_name`
+    `SELECT id, username, email, display_name, is_system_admin, can_create_cases, active, created_at FROM users ORDER BY display_name`
   );
   res.json(rows);
 });
@@ -41,7 +41,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 async function loadUser(id: number) {
   const { rows } = await query<any>(
-    `SELECT id, username, email, display_name, is_system_admin, active FROM users WHERE id=$1`,
+    `SELECT id, username, email, display_name, is_system_admin, can_create_cases, active FROM users WHERE id=$1`,
     [id]
   );
   return rows[0] || null;
@@ -155,6 +155,28 @@ router.put('/users/:id/role', requireAuth, requireSystemAdmin, async (req: Authe
   res.json(await loadUser(id));
 });
 
+// Grant / revoke the global "can create cases" capability. System admins can
+// always create cases, so this flag is only meaningful for non-admins, but we
+// store it regardless.
+router.put('/users/:id/can-create-cases', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id || Number.isNaN(id)) return res.status(400).json({ error: 'Invalid user id' });
+  const cur = await loadUser(id);
+  if (!cur) return res.status(404).json({ error: 'User not found' });
+  const value = (req.body || {}).value;
+  if (typeof value !== 'boolean') return res.status(400).json({ error: 'value (boolean) required' });
+  if (cur.can_create_cases === value) return res.json(cur);
+
+  await query(`UPDATE users SET can_create_cases=$1 WHERE id=$2`, [value, id]);
+  await audit({
+    userId: req.user!.id,
+    action: 'user.can_create_cases_changed',
+    target: `user:${id}`,
+    detail: `${cur.username}: can_create_cases ${cur.can_create_cases} -> ${value}`,
+  });
+  res.json(await loadUser(id));
+});
+
 // Activate / deactivate a user. A deactivated user is blocked from logging in
 // (and rejected on the next request). Guards against self-deactivation and
 // deactivating the last remaining active system admin.
@@ -233,6 +255,13 @@ router.post('/cases', requireAuth, requireSystemAdmin, async (req: AuthedRequest
   const { rows } = await query<any>(
     `INSERT INTO cases (name, case_number, description, created_by) VALUES ($1,$2,$3,$4) RETURNING *`,
     [name, caseNumber || null, description || null, req.user!.id]
+  );
+  // Enrol the creator as case_manager of their new case (idempotent). Harmless
+  // for system admins, who can already see all cases.
+  await query(
+    `INSERT INTO case_memberships (user_id, case_id, role) VALUES ($1,$2,'case_manager')
+     ON CONFLICT (user_id, case_id) DO NOTHING`,
+    [req.user!.id, rows[0].id]
   );
   await audit({ userId: req.user!.id, caseId: rows[0].id, action: 'case_created', target: name });
   res.json(rows[0]);
