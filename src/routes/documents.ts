@@ -23,7 +23,9 @@ const MAX_DOCS_PER_TERM = 500;
 const keywordUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024, files: 1 } });
 
 // Search / list documents within a case (read_only+)
-router.get('/case/:caseId/documents', requireAuth, requireCaseRole('read_only'), async (req: AuthedRequest, res) => {
+// Exported so the token-auth /api/v1 route can reuse the exact same listing,
+// search, filtering and pagination logic.
+export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
   const caseId = (req as any).caseId;
   const u = req.user!;
   const q = (req.query.q as string || '').trim();
@@ -133,7 +135,8 @@ router.get('/case/:caseId/documents', requireAuth, requireCaseRole('read_only'),
   }
 
   res.json({ total, limit, offset, mode, documents: rows });
-});
+};
+router.get('/case/:caseId/documents', requireAuth, requireCaseRole('read_only'), listDocumentsHandler);
 
 // ---- Keyword-list batch GREP (read_only+) -----------------------------------
 // Upload a .txt of terms (one per line, # comments ignored) and grep every term

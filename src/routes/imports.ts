@@ -31,7 +31,9 @@ const storage = multer.diskStorage({
     cb(null, path.basename(file.originalname));
   },
 });
-const upload = multer({
+// Exported so the versioned public API (/api/v1) can reuse the exact same
+// multipart staging (one stable per-request dir for DAT/OPT/images together).
+export const upload = multer({
   storage,
   limits: { fileSize: 512 * 1024 * 1024, files: 2000 }, // nginx vhost allows 512m bodies
 });
@@ -170,7 +172,9 @@ function startIngestJob(args: {
 
 // ---- POST /api/cases/:caseId/imports — upload + kick ingest ------------------
 // RBAC: case_manager or above on the case (system_admin passes globally).
-router.post('/:caseId/imports', requireAuth, requireCaseRole('case_manager'), upload.any(), async (req: AuthedRequest, res) => {
+// Exported handler so both the cookie route and the token-auth /api/v1 route
+// run the IDENTICAL ingest kickoff.
+export const uploadImportHandler = async (req: AuthedRequest, res: any) => {
   const caseId = parseInt(req.params.caseId, 10);
   const stageDir: string = (req as any)._stageDir;
   const uploaded = (req.files as Express.Multer.File[]) || [];
@@ -249,14 +253,15 @@ router.post('/:caseId/imports', requireAuth, requireCaseRole('case_manager'), up
     imageCount: copied,
     collisions,
   });
-});
+};
+router.post('/:caseId/imports', requireAuth, requireCaseRole('case_manager'), upload.any(), uploadImportHandler);
 
 // ---- POST /api/cases/:caseId/imports/path — ingest from a network/folder location
 // RBAC identical to the upload route (case_manager or above; system_admin global).
 // Reads an already-processed Concordance loadfile from a server-reachable path
 // (mounted SMB/NFS share or BLOB storage mounted as a path) instead of a browser
 // upload. Reuses the exact same walk/flattenImages/startIngestJob pipeline.
-router.post('/:caseId/imports/path', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
+export const pathImportHandler = async (req: AuthedRequest, res: any) => {
   const caseId = parseInt(req.params.caseId, 10);
 
   // 1. Validate the server-side path (absolute, exists, readable, within an allowed root).
@@ -324,10 +329,11 @@ router.post('/:caseId/imports/path', requireAuth, requireCaseRole('case_manager'
     cleanup();
     return res.status(400).json({ error: 'That location could not be read by the server.' });
   }
-});
+};
+router.post('/:caseId/imports/path', requireAuth, requireCaseRole('case_manager'), pathImportHandler);
 
 // ---- GET /api/cases/:caseId/imports/:importId — status ----------------------
-router.get('/:caseId/imports/:importId', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
+export const importStatusHandler = async (req: AuthedRequest, res: any) => {
   const caseId = parseInt(req.params.caseId, 10);
   const importId = parseInt(req.params.importId, 10);
   const { rows } = await query(
@@ -340,7 +346,8 @@ router.get('/:caseId/imports/:importId', requireAuth, requireCaseRole('case_mana
   );
   if (!rows.length) return res.status(404).json({ error: 'Import not found' });
   res.json(rows[0]);
-});
+};
+router.get('/:caseId/imports/:importId', requireAuth, requireCaseRole('case_manager'), importStatusHandler);
 
 // ---- GET /api/cases/:caseId/imports — history list --------------------------
 router.get('/:caseId/imports', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {

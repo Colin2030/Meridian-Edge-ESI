@@ -7,7 +7,8 @@ import { AuthedRequest, requireAuth, requireCaseRole, getCaseRole, requireCanCre
 const router = Router();
 
 // List cases the user can access, with counts.
-router.get('/', requireAuth, async (req: AuthedRequest, res) => {
+// Exported so the token-auth /api/v1 route returns the IDENTICAL case list.
+export const listCasesHandler = async (req: AuthedRequest, res: any) => {
   const u = req.user!;
   const params: any[] = [];
   let whereCase = '';
@@ -30,7 +31,8 @@ router.get('/', requireAuth, async (req: AuthedRequest, res) => {
     out.push({ ...c, role });
   }
   res.json(out);
-});
+};
+router.get('/', requireAuth, listCasesHandler);
 
 // Create a case. Open to system administrators (always) and to any user granted
 // the global `can_create_cases` capability. A non-admin creator is automatically
@@ -38,7 +40,7 @@ router.get('/', requireAuth, async (req: AuthedRequest, res) => {
 // and manage it. System admins already see every case, so a membership row is
 // not required for them, but we add one anyway when they are not already a member
 // — it is harmless and keeps the "creator manages their case" invariant simple.
-router.post('/', requireAuth, requireCanCreateCases, async (req: AuthedRequest, res) => {
+export const createCaseHandler = async (req: AuthedRequest, res: any) => {
   const { name, caseNumber, description } = req.body || {};
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'name required' });
   const created = await withTx(async (q) => {
@@ -57,7 +59,8 @@ router.post('/', requireAuth, requireCanCreateCases, async (req: AuthedRequest, 
   });
   await audit({ userId: req.user!.id, caseId: created.id, action: 'case_created', target: created.name });
   res.status(201).json(created);
-});
+};
+router.post('/', requireAuth, requireCanCreateCases, createCaseHandler);
 
 // Case detail
 router.get('/:caseId', requireAuth, requireCaseRole('read_only'), async (req: AuthedRequest, res) => {

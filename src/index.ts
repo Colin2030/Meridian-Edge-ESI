@@ -12,6 +12,8 @@ import adminRoutes from './routes/admin';
 import fileRoutes from './routes/files';
 import importRoutes from './routes/imports';
 import binderRoutes from './routes/binders';
+import tokenRoutes from './routes/tokens';
+import v1Routes from './routes/v1';
 
 const app = express();
 app.set('trust proxy', true);
@@ -52,6 +54,8 @@ app.use('/api/cases', importRoutes);
 app.use('/api/cases', binderRoutes);
 app.use('/api/cases', caseRoutes);
 app.use('/api', docRoutes);
+app.use('/api/tokens', tokenRoutes);
+app.use('/api/v1', v1Routes);
 app.use('/api/admin', adminRoutes);
 app.use('/api', fileRoutes);
 
