@@ -6,8 +6,23 @@ import { config } from '../config';
 import { hashPassword } from '../lib/auth';
 import { audit } from '../lib/audit';
 import { AuthedRequest, requireAuth, requireSystemAdmin } from '../middleware/auth';
+import { getSeatInfo } from '../lib/license';
 
 const router = Router();
+
+// Seat-cap guard. Returns an error message to send with 409 if making one more
+// user active would exceed (or there is no licence covering) the licensed seats;
+// null if there is room. `delta` is how many active users this action adds (1).
+async function seatBlockMessage(delta = 1): Promise<string | null> {
+  const info = await getSeatInfo();
+  if (!info.licensed) {
+    return 'No valid licence is installed, so no seats are available. Upload a valid licence before adding or re-activating users.';
+  }
+  if (info.seatsUsed + delta > (info.seats ?? 0)) {
+    return `Licence seat limit reached (${info.seatsUsed} of ${info.seats} seats in use). Deactivate a user or upload a licence with more seats.`;
+  }
+  return null;
+}
 
 // List all users (system admin)
 router.get('/users', requireAuth, requireSystemAdmin, async (_req, res) => {
@@ -21,6 +36,9 @@ router.get('/users', requireAuth, requireSystemAdmin, async (_req, res) => {
 router.post('/users', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
   const { username, password, displayName, email, isSystemAdmin } = req.body || {};
   if (!username || !password || !displayName) return res.status(400).json({ error: 'username, password, displayName required' });
+  // Seat-cap: a new user is created active, consuming one seat.
+  const seatMsg = await seatBlockMessage(1);
+  if (seatMsg) return res.status(409).json({ error: seatMsg, seatLimit: true });
   try {
     const { rows } = await query<any>(
       `INSERT INTO users (username, email, display_name, password_hash, is_system_admin)
@@ -192,6 +210,11 @@ router.put('/users/:id/active', requireAuth, requireSystemAdmin, async (req: Aut
     // Deactivation guards
     if (id === req.user!.id) return res.status(400).json({ error: 'You cannot deactivate your own account' });
     if (cur.is_system_admin && (await otherActiveAdmins(id)) === 0) return res.status(400).json({ error: 'Cannot deactivate the last active system administrator' });
+  }
+  if (!cur.active && active) {
+    // Re-activation consumes a seat — enforce the licence seat cap.
+    const seatMsg = await seatBlockMessage(1);
+    if (seatMsg) return res.status(409).json({ error: seatMsg, seatLimit: true });
   }
   if (cur.active === active) return res.json(await loadUser(id));
 

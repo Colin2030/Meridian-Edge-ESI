@@ -1,7 +1,12 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { api } from './api';
 
-export interface User { id: number; username: string; displayName: string; email?: string; isSystemAdmin: boolean; canCreateCases?: boolean; }
+export interface LicenceSummary {
+  installed: boolean; valid: boolean; expired: boolean;
+  customer: string | null; seats: number | null; seatsUsed: number; seatsRemaining: number | null;
+  expiresAt: string | null; daysRemaining: number | null; reason?: string;
+}
+export interface User { id: number; username: string; displayName: string; email?: string; isSystemAdmin: boolean; canCreateCases?: boolean; licence?: LicenceSummary; }
 
 interface AuthCtx {
   user: User | null;

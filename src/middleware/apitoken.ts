@@ -2,6 +2,7 @@ import { Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { query } from '../db';
 import { AuthedRequest } from './auth';
+import { assertLicenceAllowsAccess } from '../lib/license';
 
 // ---- Token format & hashing -------------------------------------------------
 // Raw token: me_live_<43-char base64url of 32 random bytes>. High entropy (256
@@ -59,6 +60,14 @@ export async function requireApiToken(req: AuthedRequest, res: Response, next: N
     // Set req.user exactly like requireAuth so downstream RBAC is identical.
     req.user = { id: row.user_id, username: row.username, isSystemAdmin: row.is_system_admin };
     (req as any).apiTokenId = row.id;
+
+    // Commercial licence gate — consistent with the cookie-session block. Token
+    // calls act as their owning user; non-admin owners are blocked when there is
+    // no valid licence. System admins always pass.
+    const lic = await assertLicenceAllowsAccess(req.user);
+    if (!lic.allowed) {
+      return res.status(403).json({ error: lic.reason || 'Your licence does not permit access. Please contact your administrator.', licenceExpired: true });
+    }
 
     // Throttled last_used_at bump (fire-and-forget; never blocks the request).
     const now = Date.now();

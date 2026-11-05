@@ -14,6 +14,8 @@ import importRoutes from './routes/imports';
 import binderRoutes from './routes/binders';
 import tokenRoutes from './routes/tokens';
 import v1Routes from './routes/v1';
+import licenceRoutes from './routes/licenses';
+import { refreshLicenceCache } from './lib/license';
 
 const app = express();
 app.set('trust proxy', true);
@@ -56,6 +58,7 @@ app.use('/api/cases', caseRoutes);
 app.use('/api', docRoutes);
 app.use('/api/tokens', tokenRoutes);
 app.use('/api/v1', v1Routes);
+app.use('/api/admin', licenceRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api', fileRoutes);
 
@@ -80,4 +83,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 app.listen(config.port, '127.0.0.1', () => {
   // eslint-disable-next-line no-console
   console.log(`Meridian Edge listening on http://127.0.0.1:${config.port} (env=${config.env})`);
+  // Warm the licence cache at startup so the first request is not slowed and the
+  // enforcement gate has state immediately.
+  refreshLicenceCache().catch((e) => console.error('licence cache warm failed', e));
 });

@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { Users, FolderPlus, Plus, ShieldCheck, UserCog, Pencil, Trash2, X, AlertTriangle, KeyRound, Power, Shield, Copy, Check } from 'lucide-react';
+import { Users, FolderPlus, Plus, ShieldCheck, UserCog, Pencil, Trash2, X, AlertTriangle, KeyRound, Power, Shield, Copy, Check, FileKey } from 'lucide-react';
 import ApiTokensPanel from '../components/ApiTokensPanel';
+import LicencePanel from '../components/LicencePanel';
 
 interface SysUser { id: number; username: string; email: string; display_name: string; is_system_admin: boolean; can_create_cases: boolean; active: boolean; created_at: string; }
 interface CaseRow { id: number; name: string; case_number: string | null; description: string | null; status: string; }
 
 export default function Admin() {
-  const [tab, setTab] = useState<'users' | 'cases' | 'tokens'>('users');
+  const [tab, setTab] = useState<'users' | 'cases' | 'tokens' | 'licence'>('users');
   const [users, setUsers] = useState<SysUser[]>([]);
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [err, setErr] = useState('');
@@ -53,7 +54,7 @@ export default function Admin() {
       <p className="text-sm text-slate-500 mb-6">Manage investigator accounts and cases. Assign users to cases from each case's settings panel.</p>
 
       <div className="flex gap-1 rounded-lg bg-slate-100 p-1 w-fit mb-5">
-        {([['users', 'Users', Users], ['cases', 'Cases', FolderPlus], ['tokens', 'API tokens', KeyRound]] as const).map(([k, label, Icon]) => (
+        {([['users', 'Users', Users], ['cases', 'Cases', FolderPlus], ['tokens', 'API tokens', KeyRound], ['licence', 'Licence', FileKey]] as const).map(([k, label, Icon]) => (
           <button key={k} onClick={() => { setTab(k); setErr(''); setMsg(''); }} className={`flex items-center gap-1.5 rounded-md px-4 py-1.5 text-sm font-medium ${tab === k ? 'bg-white shadow-sm text-navy-900' : 'text-slate-500'}`}>
             <Icon size={15} />{label}
           </button>
@@ -143,6 +144,7 @@ export default function Admin() {
       )}
 
       {tab === 'tokens' && <ApiTokensPanel users={users} />}
+      {tab === 'licence' && <LicencePanel />}
 
       {editing && (
         <EditCaseModal

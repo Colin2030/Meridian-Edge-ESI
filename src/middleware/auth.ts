@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { verifyToken } from '../lib/auth';
 import { query } from '../db';
+import { assertLicenceAllowsAccess } from '../lib/license';
 
 export interface AuthedRequest extends Request {
   user?: { id: number; username: string; isSystemAdmin: boolean };
@@ -25,6 +26,14 @@ export async function requireAuth(req: AuthedRequest, res: Response, next: NextF
       return res.status(403).json({ error: 'This account is inactive. Please contact a system administrator.' });
     }
     req.user = { id: payload.uid, username: rows[0].username, isSystemAdmin: rows[0].is_system_admin };
+
+    // Commercial licence gate. System admins ALWAYS pass (so they can log in and
+    // upload a renewal). Everyone else is blocked when there is no valid,
+    // in-window licence. Evaluated AFTER the user is identified so admins bypass.
+    const lic = await assertLicenceAllowsAccess(req.user);
+    if (!lic.allowed) {
+      return res.status(403).json({ error: lic.reason || 'Your licence does not permit access. Please contact your administrator.', licenceExpired: true });
+    }
     next();
   } catch (e) {
     next(e);
