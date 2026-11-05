@@ -10,6 +10,8 @@
     "build:server": "tsc -p tsconfig.json",
     "build": "npm run build:web && npm run build:server",
     "migrate": "ts-node scripts/migrate.ts",
+    "migrate:prod": "node scripts/migrate-prod.js",
+    "bootstrap-admin": "node scripts/bootstrap-admin.js",
     "seed": "ts-node scripts/seed.ts",
     "import": "ts-node scripts/import.ts",
     "gen-samples": "ts-node scripts/gen_samples.ts",

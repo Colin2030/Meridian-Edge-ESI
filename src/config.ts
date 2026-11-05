@@ -8,7 +8,12 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL || '',
   sessionSecret: process.env.SESSION_SECRET || 'dev-insecure-secret-change-me',
   enableOcr: (process.env.ENABLE_OCR || 'false').toLowerCase() === 'true',
-  uploadsDir: path.resolve(process.cwd(), 'uploads'),
+  // Directory where rendered page images and staged imports are stored.
+  // Defaults to <cwd>/uploads; override with UPLOADS_DIR (absolute path) to keep
+  // document data on a separate volume in a production deployment.
+  uploadsDir: process.env.UPLOADS_DIR
+    ? path.resolve(process.env.UPLOADS_DIR)
+    : path.resolve(process.cwd(), 'uploads'),
   webDist: path.resolve(process.cwd(), 'web', 'dist'),
   // Server-side ingest from a network/folder location (mounted SMB/NFS share or
   // BLOB storage mounted as a path). Only paths *within* one of these absolute
