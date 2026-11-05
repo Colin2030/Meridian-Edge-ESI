@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs';
 import { query, withTx } from '../db';
 import { audit } from '../lib/audit';
 import { AuthedRequest, requireAuth, requireCaseRole, getCaseRole, requireCanCreateCases } from '../middleware/auth';
+import { fileTypeExtSql } from '../lib/fileType';
 
 const router = Router();
 
@@ -90,7 +91,7 @@ router.get('/:caseId/eca', requireAuth, requireCaseRole('read_only'), async (req
   // the final extension lowercased. The [^.] guard requires a non-dot character
   // before the final dot, so leading-dot dotfiles (e.g. .gitignore) yield NULL
   // rather than a spurious extension. NULL => 'Unknown' via COALESCE below.
-  const extExpr = `lower(substring(regexp_replace(metadata->>'File Name', '_row_[0-9]+$', '', 'i') from '[^.]\\.([A-Za-z0-9]+)$'))`;
+  const extExpr = fileTypeExtSql();
   const totals = (await query<any>(
     `SELECT count(*)::int AS total_documents,
             count(*) FILTER (WHERE ${extExpr} = 'eml')::int AS email_count,

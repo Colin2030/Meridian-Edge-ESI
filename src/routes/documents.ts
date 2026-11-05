@@ -6,6 +6,7 @@ import { query } from '../db';
 import { config } from '../config';
 import { audit } from '../lib/audit';
 import { AuthedRequest, requireAuth, requireCaseRole } from '../middleware/auth';
+import { fileTypeBucketSql } from '../lib/fileType';
 import {
   parsePatternOptions, buildPattern, regexOperator, validatePattern,
   queryWithTimeout, PatternError, buildJsRegex, makeSnippet, leadingExcerpt,
@@ -36,6 +37,16 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
   const dateFrom = (req.query.dateFrom as string || '').trim();
   const dateTo = (req.query.dateTo as string || '').trim();
   const bookmarked = (req.query.bookmarked as string) === 'true';
+  // File-type filter: accepts a comma-separated list and/or a repeated param
+  // (?fileTypes=eml,csv or ?fileTypes=eml&fileTypes=csv). Normalised to a
+  // lowercased, trimmed, de-duplicated set. Multiple types = OR (union).
+  const rawFileTypes = req.query.fileTypes;
+  const fileTypes = Array.from(new Set(
+    (Array.isArray(rawFileTypes) ? rawFileTypes : [rawFileTypes])
+      .flatMap((v) => String(v ?? '').split(','))
+      .map((s) => s.trim().toLowerCase())
+      .filter((s) => s.length > 0)
+  ));
   const sort = (req.query.sort as string) || 'control_number';
   const dir = ((req.query.dir as string) || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
@@ -74,6 +85,13 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
   if (dateTo) {
     params.push(dateTo);
     where.push(`(d.metadata->>'DATE') <= $${params.length}`);
+  }
+  if (fileTypes.length) {
+    // Restrict to documents whose derived file-type bucket is in the selected
+    // set (OR/union). lower() around the bucket makes the 'Unknown' bucket match
+    // the lowercased input; the extension itself is already lowercased.
+    params.push(fileTypes);
+    where.push(`lower(${fileTypeBucketSql('d.metadata')}) = ANY($${params.length}::text[])`);
   }
   params.push(u.id);
   const bmParam = params.length;

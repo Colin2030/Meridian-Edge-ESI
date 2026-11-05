@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDate, reviewMeta, REVIEW_STATES } from '../lib/format';
@@ -43,6 +43,12 @@ export default function CaseWorkspace() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [bookmarked, setBookmarked] = useState(false);
+  // file-type filter: the selected set of extensions, plus the list of types
+  // present in the case (with counts) sourced from the existing ECA endpoint.
+  const [fileTypes, setFileTypes] = useState<Set<string>>(new Set());
+  const [fileTypeOptions, setFileTypeOptions] = useState<{ file_type: string; count: number }[]>([]);
+  const [ftOpen, setFtOpen] = useState(false);
+  const ftRef = useRef<HTMLDivElement>(null);
   const [sort, setSort] = useState('control_number');
   const [dir, setDir] = useState<'asc' | 'desc'>('asc');
   const [page, setPage] = useState(0);
@@ -56,6 +62,24 @@ export default function CaseWorkspace() {
 
   useEffect(() => { api.get<CaseInfo>(`/api/cases/${caseId}`).then(setInfo); }, [caseId]);
 
+  // File types present in the case (with counts), ordered most-occurring first,
+  // reused from the ECA endpoint to populate the file-type filter tick boxes.
+  useEffect(() => {
+    api.get<{ file_types: { file_type: string; count: number }[] }>(`/api/cases/${caseId}/eca`)
+      .then((r) => setFileTypeOptions(r.file_types || []))
+      .catch(() => setFileTypeOptions([]));
+  }, [caseId]);
+
+  // Close the file-type popover on outside click or Escape (keyboard-accessible).
+  useEffect(() => {
+    if (!ftOpen) return;
+    const onDown = (e: MouseEvent) => { if (ftRef.current && !ftRef.current.contains(e.target as Node)) setFtOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFtOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [ftOpen]);
+
   // Build the document-list query params for the active search/filter state.
   // `extra` lets callers override limit/offset (e.g. to resolve all matching ids).
   const buildParams = useCallback((extra?: Record<string, string>) => {
@@ -66,6 +90,7 @@ export default function CaseWorkspace() {
     if (dateFrom) p.set('dateFrom', dateFrom);
     if (dateTo) p.set('dateTo', dateTo);
     if (bookmarked) p.set('bookmarked', 'true');
+    if (fileTypes.size) p.set('fileTypes', Array.from(fileTypes).join(','));
     if (mode === 'pattern') {
       p.set('mode', 'pattern');
       p.set('literal', String(literal));
@@ -78,7 +103,7 @@ export default function CaseWorkspace() {
     p.set('offset', String(page * limit));
     if (extra) for (const [k, v] of Object.entries(extra)) p.set(k, v);
     return p;
-  }, [q, status, tagId, dateFrom, dateTo, bookmarked, sort, dir, page, mode, literal, caseSensitive, wholeWord]);
+  }, [q, status, tagId, dateFrom, dateTo, bookmarked, fileTypes, sort, dir, page, mode, literal, caseSensitive, wholeWord]);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -91,7 +116,7 @@ export default function CaseWorkspace() {
   useEffect(() => { const t = setTimeout(load, q ? 250 : 0); return () => clearTimeout(t); }, [load, q]);
 
   // Clear any selection whenever the result set changes (new filter/search).
-  useEffect(() => { setSelected(new Set()); setSelectAllMatching(false); }, [q, status, tagId, dateFrom, dateTo, bookmarked, mode, literal, caseSensitive, wholeWord]);
+  useEffect(() => { setSelected(new Set()); setSelectAllMatching(false); }, [q, status, tagId, dateFrom, dateTo, bookmarked, fileTypes, mode, literal, caseSensitive, wholeWord]);
 
   // Resolve the ids to add to a binder: the whole matching set when "select all
   // matching" is active (paged fetch, 200 at a time), otherwise the ticked rows.
@@ -108,8 +133,12 @@ export default function CaseWorkspace() {
     return ids;
   }, [selectAllMatching, selected, total, buildParams, caseId]);
 
-  const resetFilters = () => { setQ(''); setStatus(''); setTagId(''); setDateFrom(''); setDateTo(''); setBookmarked(false); setPage(0); };
-  const activeFilters = [status, tagId, dateFrom, dateTo].filter(Boolean).length + (bookmarked ? 1 : 0);
+  const resetFilters = () => { setQ(''); setStatus(''); setTagId(''); setDateFrom(''); setDateTo(''); setBookmarked(false); setFileTypes(new Set()); setPage(0); };
+  const activeFilters = [status, tagId, dateFrom, dateTo].filter(Boolean).length + (bookmarked ? 1 : 0) + fileTypes.size;
+  const toggleFileType = (ft: string) => {
+    setPage(0);
+    setFileTypes((prev) => { const n = new Set(prev); if (n.has(ft)) n.delete(ft); else n.add(ft); return n; });
+  };
   const canManage = info?.role === 'system_admin' || info?.role === 'case_manager';
   const canReport = canManage || info?.role === 'reviewer';
   const canBinder = canReport; // reviewer+ may group documents into binders
@@ -253,6 +282,37 @@ export default function CaseWorkspace() {
             <button onClick={() => { setBookmarked((b) => !b); setPage(0); }} className={`btn-outline ${bookmarked ? 'border-accent text-accent-dark bg-accent/5' : ''}`}>
               <Bookmark size={15} className={bookmarked ? 'fill-accent text-accent' : ''} /> Bookmarked
             </button>
+            {/* file-type filter popover */}
+            <div className="relative" ref={ftRef}>
+              <button type="button" onClick={() => setFtOpen((o) => !o)}
+                aria-haspopup="true" aria-expanded={ftOpen}
+                className={`btn-outline ${fileTypes.size ? 'border-accent text-accent-dark bg-accent/5' : ''}`}>
+                <FileType2 size={15} /> File type
+                {fileTypes.size > 0 && <span className="ml-1 rounded-full bg-accent px-1.5 text-xs font-semibold text-white">{fileTypes.size}</span>}
+              </button>
+              {ftOpen && (
+                <div role="menu" className="absolute right-0 z-40 mt-1 w-60 rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg">
+                  <div className="flex items-center justify-between px-2 py-1.5">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">File type</span>
+                    {fileTypes.size > 0 && (
+                      <button onClick={() => { setFileTypes(new Set()); setPage(0); }} className="text-xs text-accent-dark hover:underline">Clear</button>
+                    )}
+                  </div>
+                  <div className="max-h-64 overflow-auto">
+                    {fileTypeOptions.length === 0 ? (
+                      <p className="px-2 py-2 text-xs text-slate-400">No file types in this case.</p>
+                    ) : fileTypeOptions.map((ft) => (
+                      <label key={ft.file_type} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-slate-50">
+                        <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-accent focus:ring-accent"
+                          checked={fileTypes.has(ft.file_type)} onChange={() => toggleFileType(ft.file_type)} />
+                        <span className="flex-1 text-slate-700">{ft.file_type}</span>
+                        <span className="text-xs text-slate-400">{ft.count}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             {(activeFilters > 0 || q) && <button onClick={resetFilters} className="btn-ghost text-slate-500"><X size={15} /> Clear</button>}
           </div>
         </div>
