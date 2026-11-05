@@ -6,7 +6,8 @@ import multer from 'multer';
 import { config } from '../config';
 import { query } from '../db';
 import { AuthedRequest, requireAuth, requireCaseRole } from '../middleware/auth';
-import { runImport } from '../lib/ingest';
+import { runImport, runEdrmImport } from '../lib/ingest';
+import { isEdrmXml } from '../lib/loadfile';
 import { audit } from '../lib/audit';
 
 const router = Router();
@@ -65,6 +66,76 @@ function flattenImages(files: string[], imagesDir: string): { copied: number; co
     copied++;
   }
   return { copied, collisions };
+}
+
+/**
+ * Detect an EDRM XML 1.2 loadfile among the candidate files. Returns the path of
+ * the first `.xml` whose content sniffs as EDRM XML (checked cheaply from the file
+ * head), or null when none is present. Used to autodetect EDRM vs Concordance DAT.
+ */
+function detectEdrmXml(files: string[]): string | null {
+  for (const f of files) {
+    if (path.extname(f).toLowerCase() !== '.xml') continue;
+    let head = '';
+    try {
+      const fd = fs.openSync(f, 'r');
+      try {
+        const buf = Buffer.alloc(8192);
+        const n = fs.readSync(fd, buf, 0, buf.length, 0);
+        head = buf.subarray(0, n).toString('utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch { continue; }
+    if (isEdrmXml(head)) return f;
+  }
+  return null;
+}
+
+// ---- Background job: run the EDRM XML ingest pipeline ------------------------
+function startEdrmJob(args: {
+  importId: number; caseId: number; xmlPath: string; sourceRoot: string;
+  importedBy: number; setName: string;
+}) {
+  const warnings: string[] = [];
+  const missing: string[] = [];
+  const opts = {
+    caseId: args.caseId,
+    xmlPath: args.xmlPath,
+    sourceRoot: args.sourceRoot,
+    importedBy: args.importedBy,
+    setName: args.setName,
+    setId: args.importId,
+    log: (m: string) => {
+      const mm = m.trim();
+      if (mm.startsWith('! missing native')) { missing.push(mm.replace(/^!\s*/, '')); }
+      else if (mm.startsWith('!')) { warnings.push(mm.replace(/^!\s*/, '')); }
+    },
+  };
+  // Fire-and-forget; errors are captured onto the import row.
+  (async () => {
+    try {
+      const res = await runEdrmImport(opts);
+      let note: string | null = null;
+      if (missing.length) {
+        const sample = missing.slice(0, 8).join('; ');
+        note = `Completed with ${missing.length} missing native file reference(s): ${sample}${missing.length > 8 ? ' …' : ''}`;
+      }
+      await query(`UPDATE loadfile_imports SET error=$2 WHERE id=$1`, [args.importId, note]);
+      await audit({
+        userId: args.importedBy, caseId: args.caseId, action: 'import.completed',
+        target: `import:${args.importId}`,
+        detail: `${res.docCount} documents (EDRM XML, ${args.setName})${note ? ' — ' + note : ''}`,
+      });
+    } catch (e: any) {
+      const msg = (e?.message || String(e)).slice(0, 500);
+      await query(`UPDATE loadfile_imports SET status='failed', phase='failed', error=$2 WHERE id=$1`, [args.importId, msg]);
+      await audit({
+        userId: args.importedBy, caseId: args.caseId, action: 'import.failed',
+        target: `import:${args.importId}`, detail: msg,
+      });
+    }
+  })();
 }
 
 // ---- Server-side path validation (network / folder location source) ---------
@@ -206,6 +277,35 @@ export const uploadImportHandler = async (req: AuthedRequest, res: any) => {
   // Gather every candidate file (direct uploads + anything extracted from zips).
   const allFiles = walk(stageDir).filter((p) => !p.endsWith('.zip'));
 
+  // ---- Autodetect EDRM XML 1.2 loadfile (third format alongside DAT/OPT) -----
+  // If an EDRM XML loadfile is present, dispatch to the EDRM pipeline. Native
+  // files are resolved relative to the folder containing the XML (its natives/
+  // companion), so ZIP uploads — which preserve the directory tree — carry the
+  // natives across intact.
+  const edrmXmlPath = detectEdrmXml(allFiles);
+  if (edrmXmlPath) {
+    const sourceRoot = path.dirname(edrmXmlPath);
+    const setName = (req.body?.name as string)?.trim() || path.basename(edrmXmlPath);
+    const ins = await query<{ id: number }>(
+      `INSERT INTO loadfile_imports (case_id, name, xml_filename, imported_by, status, phase, source_kind, original_files)
+       VALUES ($1,$2,$3,$4,'pending','parsing','edrm',$5) RETURNING id`,
+      [caseId, setName, path.basename(edrmXmlPath), req.user!.id, JSON.stringify(originalFiles)]
+    );
+    const importId = ins.rows[0].id;
+    await audit({
+      userId: req.user!.id, caseId, action: 'import.started',
+      target: `import:${importId}`,
+      detail: `${setName} — EDRM XML=${path.basename(edrmXmlPath)}`,
+    });
+    startEdrmJob({ importId, caseId, xmlPath: edrmXmlPath, sourceRoot, importedBy: req.user!.id, setName });
+    return res.status(202).json({
+      importId,
+      status: 'pending',
+      format: 'edrm',
+      xmlFile: path.basename(edrmXmlPath),
+    });
+  }
+
   const datFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.dat');
   const optFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.opt');
 
@@ -279,6 +379,36 @@ export const pathImportHandler = async (req: AuthedRequest, res: any) => {
   try {
     // 3. Walk the source location and locate the loadfile (reuse existing helpers).
     const allFiles = walk(sourceRoot);
+
+    // ---- Autodetect EDRM XML 1.2 loadfile (third format alongside DAT/OPT) ----
+    // Natives resolve relative to the folder containing the XML (its natives/
+    // companion) — the on-disk tree at the network/folder location is read as-is.
+    const edrmXmlPath = detectEdrmXml(allFiles);
+    if (edrmXmlPath) {
+      const edrmRoot = path.dirname(edrmXmlPath);
+      const setName = (req.body?.name as string)?.trim() || path.basename(edrmXmlPath);
+      const ins = await query<{ id: number }>(
+        `INSERT INTO loadfile_imports (case_id, name, xml_filename, imported_by, status, phase, source_kind, original_files)
+         VALUES ($1,$2,$3,$4,'pending','parsing','edrm',$5) RETURNING id`,
+        [caseId, setName, path.basename(edrmXmlPath), req.user!.id, JSON.stringify([{ path: sourceRoot, xml: path.basename(edrmXmlPath) }])]
+      );
+      const importId = ins.rows[0].id;
+      await audit({
+        userId: req.user!.id, caseId, action: 'import.started',
+        target: `import:${importId}`,
+        detail: `${setName} — network/folder location "${sourceRoot}" — EDRM XML=${path.basename(edrmXmlPath)}`,
+      });
+      startEdrmJob({ importId, caseId, xmlPath: edrmXmlPath, sourceRoot: edrmRoot, importedBy: req.user!.id, setName });
+      cleanup(); // EDRM reads natives directly from the source location, not the local stage dir
+      return res.status(202).json({
+        importId,
+        status: 'pending',
+        format: 'edrm',
+        xmlFile: path.basename(edrmXmlPath),
+        sourceKind: 'path',
+      });
+    }
+
     const datFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.dat');
     const optFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.opt');
 
@@ -337,7 +467,7 @@ export const importStatusHandler = async (req: AuthedRequest, res: any) => {
   const caseId = parseInt(req.params.caseId, 10);
   const importId = parseInt(req.params.importId, 10);
   const { rows } = await query(
-    `SELECT i.id, i.name, i.dat_filename, i.opt_filename, i.status, i.phase,
+    `SELECT i.id, i.name, i.dat_filename, i.opt_filename, i.xml_filename, i.status, i.phase,
             i.docs_total, i.docs_done, i.pages_done, i.doc_count, i.page_count,
             i.error, i.source_kind, i.imported_at, u.display_name AS imported_by_name
        FROM loadfile_imports i LEFT JOIN users u ON u.id = i.imported_by
@@ -353,7 +483,7 @@ router.get('/:caseId/imports/:importId', requireAuth, requireCaseRole('case_mana
 router.get('/:caseId/imports', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
   const caseId = parseInt(req.params.caseId, 10);
   const { rows } = await query(
-    `SELECT i.id, i.name, i.dat_filename, i.opt_filename, i.status, i.phase,
+    `SELECT i.id, i.name, i.dat_filename, i.opt_filename, i.xml_filename, i.status, i.phase,
             i.doc_count, i.page_count, i.error, i.source_kind, i.imported_at,
             u.display_name AS imported_by_name
        FROM loadfile_imports i LEFT JOIN users u ON u.id = i.imported_by

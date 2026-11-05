@@ -11,7 +11,7 @@ import {
 
 interface CaseInfo { id: number; name: string; case_number: string; role: string; }
 interface ImportRow {
-  id: number; name: string; dat_filename: string; opt_filename: string | null;
+  id: number; name: string; dat_filename: string | null; opt_filename: string | null; xml_filename?: string | null;
   status: string; phase: string | null; doc_count: number; page_count: number;
   docs_total?: number; docs_done?: number; pages_done?: number;
   error: string | null; source_kind: string | null; imported_at: string; imported_by_name: string | null;
@@ -21,6 +21,7 @@ function fileKind(name: string): { label: string; icon: JSX.Element; key: string
   const ext = name.toLowerCase().split('.').pop() || '';
   if (ext === 'dat') return { label: 'DAT · metadata', key: 'dat', icon: <FileSpreadsheet size={16} className="text-accent" /> };
   if (ext === 'opt') return { label: 'OPT · image references', key: 'opt', icon: <FileText size={16} className="text-accent" /> };
+  if (ext === 'xml') return { label: 'EDRM XML · loadfile', key: 'xml', icon: <FileSpreadsheet size={16} className="text-accent" /> };
   if (ext === 'zip') return { label: 'ZIP · archive', key: 'zip', icon: <FileArchive size={16} className="text-accent" /> };
   if (ext === 'pdf') return { label: 'PDF · image', key: 'img', icon: <FileType2 size={16} className="text-rose-500" /> };
   if (ext === 'tif' || ext === 'tiff') return { label: 'TIFF · image', key: 'img', icon: <FileText size={16} className="text-sky-600" /> };
@@ -91,11 +92,13 @@ export default function AddCaseData() {
   const detected = {
     dat: files.find((f) => f.name.toLowerCase().endsWith('.dat')),
     opt: files.find((f) => f.name.toLowerCase().endsWith('.opt')),
+    xml: files.find((f) => f.name.toLowerCase().endsWith('.xml')),
     zip: files.find((f) => f.name.toLowerCase().endsWith('.zip')),
     images: files.filter((f) => /\.(tif|tiff|pdf)$/i.test(f.name)),
   };
   const hasZip = !!detected.zip;
-  const readyToSubmit = files.length > 0 && (hasZip || !!detected.dat);
+  const hasEdrm = !!detected.xml;
+  const readyToSubmit = files.length > 0 && (hasZip || !!detected.dat || hasEdrm);
 
   const pollStatus = useCallback((importId: number) => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -132,7 +135,7 @@ export default function AddCaseData() {
       if (xhr.status === 202) {
         const r = JSON.parse(xhr.responseText);
         setFiles([]);
-        setJob({ id: r.importId, name: '', dat_filename: r.datFile, opt_filename: r.optFile, status: 'pending', phase: 'parsing', doc_count: 0, page_count: 0, error: null, source_kind: null, imported_at: new Date().toISOString(), imported_by_name: user?.displayName || null });
+        setJob({ id: r.importId, name: '', dat_filename: r.datFile || r.xmlFile || null, opt_filename: r.optFile || null, xml_filename: r.xmlFile || null, status: 'pending', phase: 'parsing', doc_count: 0, page_count: 0, error: null, source_kind: r.format === 'edrm' ? 'edrm' : null, imported_at: new Date().toISOString(), imported_by_name: user?.displayName || null });
         pollStatus(r.importId);
       } else {
         let msg = 'Upload failed.';
@@ -150,12 +153,12 @@ export default function AddCaseData() {
     if (!p || pathSubmitting) return;
     setErr(''); setJob(null); setPathSubmitting(true);
     try {
-      const r = await api.post<{ importId: number; datFile: string; optFile: string | null }>(
+      const r = await api.post<{ importId: number; datFile?: string; optFile?: string | null; xmlFile?: string; format?: string }>(
         `/api/cases/${caseId}/imports/path`,
         { path: p, name: pathName.trim() || undefined, ocr: pathOcr },
       );
       setPathValue(''); setPathName(''); setPathOcr(false);
-      setJob({ id: r.importId, name: '', dat_filename: r.datFile, opt_filename: r.optFile, status: 'pending', phase: 'parsing', doc_count: 0, page_count: 0, error: null, source_kind: 'path', imported_at: new Date().toISOString(), imported_by_name: user?.displayName || null });
+      setJob({ id: r.importId, name: '', dat_filename: r.datFile || r.xmlFile || null, opt_filename: r.optFile || null, xml_filename: r.xmlFile || null, status: 'pending', phase: 'parsing', doc_count: 0, page_count: 0, error: null, source_kind: r.format === 'edrm' ? 'edrm' : 'path', imported_at: new Date().toISOString(), imported_by_name: user?.displayName || null });
       pollStatus(r.importId);
     } catch (e: any) {
       setErr(e?.message || 'The location could not be read by the server.');
@@ -196,8 +199,10 @@ export default function AddCaseData() {
               index the documents and make the pages viewable and searchable.
             </p>
             <p className="mt-2 text-xs text-slate-500">
-              Expected: a <strong>.DAT</strong> (metadata), an optional <strong>.OPT</strong> (image cross-reference), and the
-              <strong> TIFF / PDF</strong> page images — either as individual files or bundled inside a single <strong>.zip</strong>.
+              Accepted formats: a Concordance <strong>.DAT</strong> (metadata) with an optional <strong>.OPT</strong> (image
+              cross-reference) and <strong>TIFF / PDF</strong> page images; or an <strong>EDRM XML 1.2</strong> loadfile
+              (<strong>edrm.xml</strong>) with its <strong>natives/</strong> folder. Supply the files individually or bundled
+              inside a single <strong>.zip</strong> — the format is detected automatically.
             </p>
           </div>
         </div>
@@ -236,12 +241,12 @@ export default function AddCaseData() {
           >
             <UploadCloud size={36} className={`mx-auto mb-2 ${dragOver ? 'text-accent' : 'text-slate-400'}`} />
             <p className="font-medium text-navy-900">Drag &amp; drop your loadfile folder as a <span className="text-accent-dark">.zip</span></p>
-            <p className="text-sm text-slate-500 mt-0.5">or select the .DAT, .OPT and TIFF/PDF files individually</p>
+            <p className="text-sm text-slate-500 mt-0.5">or select the .DAT, .OPT and TIFF/PDF files — or an EDRM XML loadfile — individually</p>
             <div className="mt-4 flex items-center justify-center gap-2">
               <button className="btn-primary" onClick={() => fileInput.current?.click()}>Select files</button>
             </div>
             <input ref={fileInput} type="file" multiple hidden
-              accept=".dat,.opt,.zip,.tif,.tiff,.pdf"
+              accept=".dat,.opt,.xml,.zip,.tif,.tiff,.pdf"
               onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
           </div>
 
@@ -271,6 +276,8 @@ export default function AddCaseData() {
               <div className="mt-3 flex flex-wrap gap-2 text-xs">
                 {hasZip ? (
                   <span className="badge bg-accent/10 text-accent-dark"><FileArchive size={13} /> ZIP archive — contents will be read on the server</span>
+                ) : hasEdrm ? (
+                  <span className="badge bg-emerald-50 text-emerald-700"><CheckCircle2 size={13} /> EDRM XML loadfile detected — its natives/ folder will be read on the server</span>
                 ) : (
                   <>
                     <span className={`badge ${detected.dat ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
@@ -315,9 +322,10 @@ export default function AddCaseData() {
               <p className="font-semibold text-navy-900">Read a loadfile from a server location</p>
               <p className="mt-1">
                 Point Meridian Edge at a folder the <strong>server</strong> can reach — a mounted network share
-                (NFS / SMB), or BLOB storage mounted as a path. The server reads the <strong>.DAT</strong>,
-                <strong> .OPT</strong> and page images directly from that location; nothing is uploaded through the browser.
-                Suitable for corporate deployments where processed data is placed on a share rather than uploaded.
+                (NFS / SMB), or BLOB storage mounted as a path. The server reads the Concordance <strong>.DAT</strong> /
+                <strong> .OPT</strong> and page images — or an <strong>EDRM XML</strong> loadfile with its <strong>natives/</strong>
+                folder — directly from that location; nothing is uploaded through the browser. Suitable for corporate
+                deployments where processed data is placed on a share rather than uploaded.
               </p>
             </div>
           </div>
@@ -338,7 +346,7 @@ export default function AddCaseData() {
               An absolute path on the Meridian Edge server, for example
               <span className="font-mono"> /mnt/esi-shares/operation-kingfisher</span> or
               <span className="font-mono"> \\fileserver\esi\OperationKingfisher</span> once mounted. You may point to the
-              folder or directly to the <strong>.DAT</strong> file.
+              folder containing the <strong>.DAT</strong> (or <strong>edrm.xml</strong>), or directly to the <strong>.DAT</strong> file.
             </p>
           </div>
 
@@ -428,7 +436,7 @@ export default function AddCaseData() {
                     <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDateTime(h.imported_at)}</td>
                     <td className="px-3 py-2.5">
                       <div className="font-medium text-navy-900">{h.name}</div>
-                      <div className="text-xs text-slate-400">{h.dat_filename}{h.opt_filename ? ` + ${h.opt_filename}` : ''}{h.source_kind === 'zip' ? ' · from .zip' : ''}{h.source_kind === 'path' ? ' · from server location' : ''}</div>
+                      <div className="text-xs text-slate-400">{h.source_kind === 'edrm' ? (h.xml_filename || 'EDRM XML') : `${h.dat_filename || ''}${h.opt_filename ? ` + ${h.opt_filename}` : ''}`}{h.source_kind === 'edrm' ? ' · EDRM XML' : ''}{h.source_kind === 'zip' ? ' · from .zip' : ''}{h.source_kind === 'path' ? ' · from server location' : ''}</div>
                       {h.error && st !== 'failed' && <div className="text-xs text-amber-600 mt-0.5">{h.error}</div>}
                       {h.error && st === 'failed' && <div className="text-xs text-rose-600 mt-0.5">{h.error}</div>}
                     </td>

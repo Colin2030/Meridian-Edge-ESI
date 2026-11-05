@@ -5,7 +5,7 @@ import { fmtDateTime, reviewMeta, REVIEW_STATES } from '../lib/format';
 import { PdfView } from '../components/PdfView';
 import {
   ChevronLeft, ChevronRight, Bookmark, ZoomIn, ZoomOut, FileType2, FileText,
-  MessageSquare, Tag as TagIcon, Plus, Send, Info, ArrowLeft, ArrowRight, X,
+  MessageSquare, Tag as TagIcon, Plus, Send, Info, ArrowLeft, ArrowRight, X, Download,
 } from 'lucide-react';
 
 interface Tag { id: number; name: string; colour: string; }
@@ -132,6 +132,15 @@ export default function DocumentViewer() {
             ) : doc.pages.length > 0 ? (
               <img src={doc.pages[Math.min(page, doc.pages.length) - 1]?.url} alt={`Page ${page}`}
                 className="mx-auto shadow-panel rounded bg-white" style={{ width: `${zoom * 70}%`, maxWidth: 'none' }} />
+            ) : doc.nativeUrl ? (
+              <div className="grid place-items-center h-full text-center">
+                <div>
+                  <FileText size={40} className="mx-auto mb-3 text-slate-300" />
+                  <p className="text-slate-500">No rendered pages — this is a native file.</p>
+                  <p className="text-xs text-slate-400 mt-0.5">View the extracted content under the <strong>Text</strong> tab, or open the original native file.</p>
+                  <a href={doc.nativeUrl} target="_blank" rel="noreferrer" className="btn-outline mt-4 inline-flex"><Download size={15} /> Open native file</a>
+                </div>
+              </div>
             ) : (
               <div className="grid place-items-center h-full text-slate-400">No image pages available for this document.</div>
             )}
