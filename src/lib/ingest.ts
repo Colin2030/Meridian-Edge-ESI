@@ -269,11 +269,15 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
 // EDRM XML import path
 // ----------------------------------------------------------------------------
 // Maps an EDRM XML loadfile onto the existing document / folder / family model.
-// This export is NATIVE-ONLY: it carries native files + metadata + relationships
-// + folders, with NO rendered TIFF/PDF pages and no OPT. Documents therefore get
-// page_count=0, the native stored and downloadable, and extracted_text read
-// directly from the native for text / email MIME types. No page rendering, no
-// OCR, no forensic/processing step — this is a reader for processing-engine output.
+// It carries native files + metadata + relationships + folders. A re-processed
+// export may additionally include a sibling images/ directory of rendered TIFF
+// pages correlated to documents by filename (page 1 = <DocID>.tif, page N>=2 =
+// <DocID>_000N.tif); when present these are rendered to PNG and stored as
+// document_pages so the viewer can display them. A native-only export (no images/
+// dir) gets page_count=0, as before. In both cases the native is stored and
+// downloadable, and extracted_text is read directly from the native for text /
+// email MIME types. No OCR, no forensic/processing step — this is a reader for
+// processing-engine output.
 // ============================================================================
 
 /** MIME types whose native file is plain text we can index directly. */
@@ -353,8 +357,33 @@ export async function runEdrmImport(opts: EdrmImportOptions): Promise<ImportResu
     if (r.parentId) childCount.set(r.parentId, (childCount.get(r.parentId) || 0) + 1);
   }
 
+  // Rendered page images: a re-processed EDRM export may carry a sibling images/
+  // directory of TIFFs correlated to documents by filename (page 1 = <DocID>.tif,
+  // page N>=2 = <DocID>_000N.tif). The XML itself does not reference them. Build a
+  // DocID -> ordered page-file map once. Native-only exports have no images/ dir.
+  const imagesDir = path.join(exportRoot, 'images');
+  const hasImagesDir = fs.existsSync(imagesDir) && fs.statSync(imagesDir).isDirectory();
+  const imagesByDoc = new Map<string, { page: number; file: string }[]>();
+  if (hasImagesDir) {
+    let tifCount = 0;
+    for (const file of fs.readdirSync(imagesDir)) {
+      if (!/\.tif$/i.test(file)) continue;
+      tifCount++;
+      const m = file.match(/^(.*)_(\d{4})\.tif$/i);
+      const base = m ? m[1] : file.replace(/\.tif$/i, '');
+      const page = m ? parseInt(m[2], 10) : 1;
+      const arr = imagesByDoc.get(base) || [];
+      arr.push({ page, file });
+      imagesByDoc.set(base, arr);
+    }
+    for (const arr of imagesByDoc.values()) arr.sort((a, b) => a.page - b.page);
+    log(`Found images/ dir: ${tifCount} page image(s) across ${imagesByDoc.size} document(s)`);
+  }
+
   const nativeRoot = path.join(config.uploadsDir, `case-${opts.caseId}`, 'native');
   fs.mkdirSync(nativeRoot, { recursive: true });
+  const renderedRoot = path.join(config.uploadsDir, `case-${opts.caseId}`, 'rendered');
+  if (hasImagesDir) fs.mkdirSync(renderedRoot, { recursive: true });
 
   // Import set row.
   let setId: number;
@@ -389,6 +418,7 @@ export async function runEdrmImport(opts: EdrmImportOptions): Promise<ImportResu
   let docCount = 0;
   let nativeCopied = 0;
   let missingNatives = 0;
+  let totalPages = 0;
 
   for (const d of edrm.documents) {
     const control = d.docId || d.fieldValues.ITEMID || `DOC-${docCount + 1}`;
@@ -446,19 +476,59 @@ export async function runEdrmImport(opts: EdrmImportOptions): Promise<ImportResu
     }
     const kids = childCount.get(d.docId);
     if (kids) metadata['Contains Items'] = String(kids);
+    // Original (human-meaningful) filename from the native's source LocationURI, so
+    // the list/viewer show e.g. "Contingency Plans.eml" rather than the SHA .bin.
+    const displayName = d.location?.uriDecoded ? path.basename(d.location.uriDecoded) : '';
+    if (displayName) metadata['File Name'] = displayName;
+
+    // --- rendered pages ------------------------------------------------------
+    // If a sibling images/ dir exists, render this doc's TIFF page(s) to PNG.
+    const pageImagePaths: string[] = [];
+    if (hasImagesDir) {
+      const imgs = imagesByDoc.get(d.docId);
+      if (imgs && imgs.length) {
+        const docDir = path.join(renderedRoot, control.replace(/[^A-Za-z0-9_-]/g, '_'));
+        fs.mkdirSync(docDir, { recursive: true });
+        let pageIdx = 0;
+        for (const img of imgs) {
+          try {
+            const rendered = renderToPages(path.join(imagesDir, img.file), docDir, pageIdx);
+            for (const rp of rendered) {
+              pageIdx++;
+              pageImagePaths.push(path.relative(config.uploadsDir, rp));
+            }
+          } catch (e: any) {
+            log(`! render failed for ${control} (${img.file}): ${e?.message || e}`);
+          }
+        }
+      }
+    }
+    totalPages += pageImagePaths.length;
 
     // --- insert document -----------------------------------------------------
     const docRow = await query<{ id: number }>(
       `INSERT INTO documents (case_id, set_id, control_number, native_type, native_path, page_count, has_text, extracted_text, metadata)
-       VALUES ($1,$2,$3,$4,$5,0,$6,$7,$8)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (case_id, control_number) DO UPDATE SET set_id=EXCLUDED.set_id, native_type=EXCLUDED.native_type,
          native_path=EXCLUDED.native_path, page_count=EXCLUDED.page_count, has_text=EXCLUDED.has_text,
          extracted_text=EXCLUDED.extracted_text, metadata=EXCLUDED.metadata
        RETURNING id`,
-      [opts.caseId, setId, control, nativeType, nativeRel, hasText, extractedText || null, JSON.stringify(metadata)]
+      [opts.caseId, setId, control, nativeType, nativeRel, pageImagePaths.length, hasText, extractedText || null, JSON.stringify(metadata)]
     );
     const dbId = docRow.rows[0].id;
     docIdToDbId.set(d.docId, dbId);
+
+    // Rendered page rows (re-processed exports only; native-only has none).
+    if (pageImagePaths.length > 0) {
+      await query(`DELETE FROM document_pages WHERE document_id=$1`, [dbId]);
+      for (let i = 0; i < pageImagePaths.length; i++) {
+        await query(
+          `INSERT INTO document_pages (document_id, page_no, image_path) VALUES ($1,$2,$3)
+           ON CONFLICT (document_id, page_no) DO UPDATE SET image_path=EXCLUDED.image_path`,
+          [dbId, i + 1, pageImagePaths[i]]
+        );
+      }
+    }
 
     // search_tsv: metadata text (weight A) + extracted text (weight B).
     const metaText = Object.values(metadata).join(' ');
@@ -478,8 +548,8 @@ export async function runEdrmImport(opts: EdrmImportOptions): Promise<ImportResu
 
     docCount++;
     if (docCount % 50 === 0 || docCount === edrm.documents.length) {
-      progress({ phase: 'rendering', docsDone: docCount, docsTotal: edrm.documents.length, pagesDone: 0 });
-      await query(`UPDATE loadfile_imports SET docs_done=$2 WHERE id=$1`, [setId, docCount]);
+      progress({ phase: 'rendering', docsDone: docCount, docsTotal: edrm.documents.length, pagesDone: totalPages });
+      await query(`UPDATE loadfile_imports SET docs_done=$2, pages_done=$3 WHERE id=$1`, [setId, docCount, totalPages]);
     }
   }
 
@@ -499,9 +569,9 @@ export async function runEdrmImport(opts: EdrmImportOptions): Promise<ImportResu
   }
 
   await query(
-    `UPDATE loadfile_imports SET doc_count=$2, page_count=0, docs_done=$2, pages_done=0, status='completed', phase='completed' WHERE id=$1`,
-    [setId, docCount]
+    `UPDATE loadfile_imports SET doc_count=$2, page_count=$3, docs_done=$2, pages_done=$3, status='completed', phase='completed' WHERE id=$1`,
+    [setId, docCount, totalPages]
   );
-  log(`EDRM import complete: ${docCount} documents, ${nativeCopied} native file(s) stored, ${placed} folder placement(s)${missingNatives ? `, ${missingNatives} missing native(s)` : ''}`);
-  return { setId, docCount, pageCount: 0 };
+  log(`EDRM import complete: ${docCount} documents, ${totalPages} rendered page(s), ${nativeCopied} native file(s) stored, ${placed} folder placement(s)${missingNatives ? `, ${missingNatives} missing native(s)` : ''}`);
+  return { setId, docCount, pageCount: totalPages };
 }

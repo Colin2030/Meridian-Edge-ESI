@@ -98,10 +98,10 @@ export default function DocumentViewer() {
           <div>
             <div className="flex items-center gap-2">
               {isPdf ? <FileType2 size={18} className="text-rose-500" /> : <FileText size={18} className="text-sky-600" />}
-              <h1 className="text-lg font-bold text-navy-900">{doc.controlNumber}</h1>
+              <h1 className="text-lg font-bold text-navy-900">{m['File Name'] || doc.controlNumber}</h1>
               <span className={`badge ${rm.cls}`}>{rm.label}</span>
             </div>
-            <div className="text-xs text-slate-400">{m.SUBJECT || m.FILENAME || ''}</div>
+            <div className="text-xs text-slate-400">{m.SUBJECT || m.FILENAME || (m['File Name'] ? doc.controlNumber : '')}</div>
           </div>
         </div>
         <div className="flex items-center gap-2">

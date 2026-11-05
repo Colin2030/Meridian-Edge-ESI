@@ -338,7 +338,8 @@ export default function CaseWorkspace() {
                     </button>
                   </td>
                   <td className="px-3 py-2.5">
-                    <Link to={`/cases/${caseId}/documents/${d.id}`} className="font-medium text-navy-900 hover:text-accent-dark">{d.control_number}</Link>
+                    <Link to={`/cases/${caseId}/documents/${d.id}`} className="font-medium text-navy-900 hover:text-accent-dark">{m['File Name'] || d.control_number}</Link>
+                    {m['File Name'] && <div className="text-xs text-slate-400 truncate max-w-[220px]" title={d.control_number}>{d.control_number}</div>}
                   </td>
                   <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDate(m.DATE)}</td>
                   <td className="px-3 py-2.5 text-slate-600 max-w-[200px] truncate" title={`${m.FROM || ''} → ${m.TO || ''}`}>
