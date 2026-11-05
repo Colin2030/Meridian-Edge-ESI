@@ -78,13 +78,15 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
     params.push(tagId);
     where.push(`EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id=d.id AND dt.tag_id=$${params.length})`);
   }
+  // Resolve the document date from the Concordance (.DAT) 'DATE' field first, then fall
+  // back to the EDRM XML 'Date Sent' field so date-range filtering also works for XML imports.
   if (dateFrom) {
     params.push(dateFrom);
-    where.push(`(d.metadata->>'DATE') >= $${params.length}`);
+    where.push(`COALESCE(NULLIF(d.metadata->>'DATE',''), d.metadata->>'Date Sent') >= $${params.length}`);
   }
   if (dateTo) {
     params.push(dateTo);
-    where.push(`(d.metadata->>'DATE') <= $${params.length}`);
+    where.push(`COALESCE(NULLIF(d.metadata->>'DATE',''), d.metadata->>'Date Sent') <= $${params.length}`);
   }
   if (fileTypes.length) {
     // Restrict to documents whose derived file-type bucket is in the selected

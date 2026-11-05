@@ -381,6 +381,12 @@ export default function CaseWorkspace() {
               <tr><td colSpan={canBinder ? 10 : 9} className="py-16 text-center text-slate-400"><Filter className="mx-auto mb-2 text-slate-300" size={28} />No documents match your filters.</td></tr>
             ) : docs.map((d) => {
               const m = d.metadata || {};
+              // Resolve list columns from Concordance (.DAT) field names first, then fall
+              // back to EDRM XML field labels so XML-imported docs populate too.
+              const dateVal = m.DATE || m['Date Sent'];
+              const fromVal = m.FROM || m['Email From'];
+              const toVal = m.TO || m['Email To'];
+              const subjVal = m.SUBJECT || m['Email Subject'] || m.FILENAME || m['File Name'];
               const rm = reviewMeta(d.review_status);
               const snip = mode === 'pattern' ? d.snippet : null;
               return (
@@ -401,12 +407,12 @@ export default function CaseWorkspace() {
                     <Link to={`/cases/${caseId}/documents/${d.id}`} className="font-medium text-navy-900 hover:text-accent-dark">{m['File Name'] || d.control_number}</Link>
                     {m['File Name'] && <div className="text-xs text-slate-400 truncate max-w-[220px]" title={d.control_number}>{d.control_number}</div>}
                   </td>
-                  <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDate(m.DATE)}</td>
-                  <td className="px-3 py-2.5 text-slate-600 max-w-[200px] truncate" title={`${m.FROM || ''} → ${m.TO || ''}`}>
-                    <div className="truncate">{m.FROM || '—'}</div>
-                    <div className="truncate text-xs text-slate-400">{m.TO || ''}</div>
+                  <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDate(dateVal)}</td>
+                  <td className="px-3 py-2.5 text-slate-600 max-w-[200px] truncate" title={`${fromVal || ''} → ${toVal || ''}`}>
+                    <div className="truncate">{fromVal || '—'}</div>
+                    <div className="truncate text-xs text-slate-400">{toVal || ''}</div>
                   </td>
-                  <td className="px-3 py-2.5 text-slate-700 max-w-[260px] truncate" title={m.SUBJECT}>{m.SUBJECT || m.FILENAME || '—'}</td>
+                  <td className="px-3 py-2.5 text-slate-700 max-w-[260px] truncate" title={subjVal}>{subjVal || '—'}</td>
                   <td className="px-3 py-2.5">
                     <span className="inline-flex items-center gap-1 text-slate-500">
                       {d.native_type === 'pdf' ? <FileType2 size={14} className="text-rose-500" /> : <FileText size={14} className="text-sky-600" />}
