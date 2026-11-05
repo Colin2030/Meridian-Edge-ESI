@@ -85,9 +85,15 @@ router.get('/:caseId/eca', requireAuth, requireCaseRole('read_only'), async (req
   if (!caseRow) return res.status(404).json({ error: 'Case not found' });
 
   // Headline counts in one pass over documents.
+  // File extension derived from the original filename (metadata "File Name"):
+  // strip any extracted-row child suffix (name.csv_row_N -> name.csv), then take
+  // the final extension lowercased. The [^.] guard requires a non-dot character
+  // before the final dot, so leading-dot dotfiles (e.g. .gitignore) yield NULL
+  // rather than a spurious extension. NULL => 'Unknown' via COALESCE below.
+  const extExpr = `lower(substring(regexp_replace(metadata->>'File Name', '_row_[0-9]+$', '', 'i') from '[^.]\\.([A-Za-z0-9]+)$'))`;
   const totals = (await query<any>(
     `SELECT count(*)::int AS total_documents,
-            count(*) FILTER (WHERE metadata->>'DOCTYPE' ILIKE 'email')::int AS email_count,
+            count(*) FILTER (WHERE ${extExpr} = 'eml')::int AS email_count,
             count(DISTINCT NULLIF(trim(metadata->>'CUSTODIAN'), ''))::int AS custodian_count
      FROM documents WHERE case_id=$1`, [caseId]
   )).rows[0];
@@ -102,12 +108,13 @@ router.get('/:caseId/eca', requireAuth, requireCaseRole('read_only'), async (req
      ORDER BY count(*) DESC, custodian ASC`, [caseId]
   )).rows;
 
-  // Document-type breakdown (cheap context metric; easy to extend later).
-  const doctypes = (await query<any>(
-    `SELECT COALESCE(NULLIF(trim(metadata->>'DOCTYPE'), ''), 'Unknown') AS doctype, count(*)::int AS count
+  // File-type breakdown by extension derived from the original filename, most
+  // documents first. Documents with no usable extension classify as 'Unknown'.
+  const fileTypes = (await query<any>(
+    `SELECT COALESCE(${extExpr}, 'Unknown') AS file_type, count(*)::int AS count
      FROM documents WHERE case_id=$1
-     GROUP BY COALESCE(NULLIF(trim(metadata->>'DOCTYPE'), ''), 'Unknown')
-     ORDER BY count(*) DESC, doctype ASC`, [caseId]
+     GROUP BY COALESCE(${extExpr}, 'Unknown')
+     ORDER BY count(*) DESC, file_type ASC`, [caseId]
   )).rows;
 
   // Tag summary: every tag in the case with its document count (incl. zero), so
@@ -162,7 +169,7 @@ router.get('/:caseId/eca', requireAuth, requireCaseRole('read_only'), async (req
       custodian_count: totals.custodian_count,
     },
     custodians,
-    doctypes,
+    file_types: fileTypes,
     tag_summary: tagSummary,
     status_summary: statusSummary,
   });

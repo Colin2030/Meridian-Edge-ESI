@@ -12,13 +12,13 @@ interface CaseMeta { id: number; name: string; case_number: string | null; descr
 interface StatusRow { status: string; label: string; count: number; }
 interface TagRow { tagId: number; name: string; colour: string; parentId: number | null; doc_count: number; }
 interface CustodianRow { custodian: string; doc_count: number; }
-interface DoctypeRow { doctype: string; count: number; }
+interface FileTypeRow { file_type: string; count: number; }
 interface Eca {
   case: CaseMeta;
   role: string;
   metrics: { total_documents: number; email_count: number; custodian_count: number };
   custodians: CustodianRow[];
-  doctypes: DoctypeRow[];
+  file_types: FileTypeRow[];
   tag_summary: TagRow[];
   status_summary: StatusRow[];
 }
@@ -213,14 +213,14 @@ export default function CaseHome() {
             </section>
           </div>
 
-          {/* Document types — cheap context metric, demonstrates the extensible panel pattern */}
-          {eca.doctypes.length > 0 && (
+          {/* File types — breakdown by file extension of the original filename */}
+          {eca.file_types.length > 0 && (
             <section className="card p-5 mt-5">
-              <h3 className="font-semibold text-navy-900 flex items-center gap-2 mb-3"><FileText size={17} className="text-accent-dark" /> Document types</h3>
+              <h3 className="font-semibold text-navy-900 flex items-center gap-2 mb-3"><FileText size={17} className="text-accent-dark" /> File types</h3>
               <div className="flex flex-wrap gap-2">
-                {eca.doctypes.map((d) => (
-                  <span key={d.doctype} className="badge bg-slate-100 text-slate-700">
-                    {d.doctype} <span className="font-bold ml-1">{d.count}</span>
+                {eca.file_types.map((d) => (
+                  <span key={d.file_type} className="badge bg-slate-100 text-slate-700">
+                    {d.file_type} <span className="font-bold ml-1">{d.count}</span>
                   </span>
                 ))}
               </div>
