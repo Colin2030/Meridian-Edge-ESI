@@ -38,6 +38,15 @@ export interface ImportResult {
   setId: number;
   docCount: number;
   pageCount: number;
+  /**
+   * Control numbers that were already present in the case (from a prior import /
+   * chunk, or duplicated within this one) and whose document row was therefore
+   * UPDATED in place rather than newly inserted (ON CONFLICT (case_id,
+   * control_number) DO UPDATE). Surfaced so sequential chunked imports into one
+   * case are auditable rather than silently last-wins. Empty when every control
+   * number was new.
+   */
+  overwritten: string[];
 }
 
 function sh(cmd: string, args: string[]): void {
@@ -149,6 +158,7 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
 
   let totalPages = 0;
   let docCount = 0;
+  const overwritten: string[] = [];
 
   for (const row of dat.rows) {
     const control = (fieldMap.control_number ? row[fieldMap.control_number] : '') || `DOC-${docCount + 1}`;
@@ -216,16 +226,23 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
       delete metadata[fieldMap.text_path];
     }
 
-    const docRow = await query<{ id: number }>(
+    const docRow = await query<{ id: number; was_overwrite: boolean }>(
       `INSERT INTO documents (case_id, set_id, control_number, native_type, native_path, page_count, has_text, extracted_text, metadata)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (case_id, control_number) DO UPDATE SET set_id=EXCLUDED.set_id, native_type=EXCLUDED.native_type,
          native_path=EXCLUDED.native_path, page_count=EXCLUDED.page_count, has_text=EXCLUDED.has_text,
          extracted_text=EXCLUDED.extracted_text, metadata=EXCLUDED.metadata
-       RETURNING id`,
+       RETURNING id, (xmax <> 0) AS was_overwrite`,
       [opts.caseId, setId, control, nativeType, nativeRel, pageImagePaths.length, hasText, extractedText || null, JSON.stringify(metadata)]
     );
     const docId = docRow.rows[0].id;
+    // xmax<>0 on the ON CONFLICT path => the row already existed and was updated
+    // in place (a control number re-used from a prior chunk/import or duplicated
+    // within this one). Record + log it so chunked imports stay auditable.
+    if (docRow.rows[0].was_overwrite) {
+      overwritten.push(control);
+      log(`! overwrote control number for ${control}: existing document in this case updated in place (chunk/import overlap)`);
+    }
 
     await query(`DELETE FROM document_pages WHERE document_id=$1`, [docId]);
     for (let i = 0; i < pageImagePaths.length; i++) {
@@ -261,8 +278,8 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
   }
 
   await query(`UPDATE loadfile_imports SET doc_count=$2, page_count=$3, docs_done=$2, pages_done=$3, status='completed', phase='completed' WHERE id=$1`, [setId, docCount, totalPages]);
-  log(`Import complete: ${docCount} documents, ${totalPages} pages`);
-  return { setId, docCount, pageCount: totalPages };
+  log(`Import complete: ${docCount} documents, ${totalPages} pages${overwritten.length ? `, ${overwritten.length} existing control number(s) updated in place` : ''}`);
+  return { setId, docCount, pageCount: totalPages, overwritten };
 }
 
 // ============================================================================
@@ -419,6 +436,7 @@ export async function runEdrmImport(opts: EdrmImportOptions): Promise<ImportResu
   let nativeCopied = 0;
   let missingNatives = 0;
   let totalPages = 0;
+  const overwritten: string[] = [];
 
   for (const d of edrm.documents) {
     const control = d.docId || d.fieldValues.ITEMID || `DOC-${docCount + 1}`;
@@ -506,17 +524,23 @@ export async function runEdrmImport(opts: EdrmImportOptions): Promise<ImportResu
     totalPages += pageImagePaths.length;
 
     // --- insert document -----------------------------------------------------
-    const docRow = await query<{ id: number }>(
+    const docRow = await query<{ id: number; was_overwrite: boolean }>(
       `INSERT INTO documents (case_id, set_id, control_number, native_type, native_path, page_count, has_text, extracted_text, metadata)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (case_id, control_number) DO UPDATE SET set_id=EXCLUDED.set_id, native_type=EXCLUDED.native_type,
          native_path=EXCLUDED.native_path, page_count=EXCLUDED.page_count, has_text=EXCLUDED.has_text,
          extracted_text=EXCLUDED.extracted_text, metadata=EXCLUDED.metadata
-       RETURNING id`,
+       RETURNING id, (xmax <> 0) AS was_overwrite`,
       [opts.caseId, setId, control, nativeType, nativeRel, pageImagePaths.length, hasText, extractedText || null, JSON.stringify(metadata)]
     );
     const dbId = docRow.rows[0].id;
     docIdToDbId.set(d.docId, dbId);
+    // xmax<>0 => this control number already existed in the case and the row was
+    // updated in place (chunk/import overlap), not newly inserted. Record + log.
+    if (docRow.rows[0].was_overwrite) {
+      overwritten.push(control);
+      log(`! overwrote control number for ${control}: existing document in this case updated in place (chunk/import overlap)`);
+    }
 
     // Rendered page rows (re-processed exports only; native-only has none).
     if (pageImagePaths.length > 0) {
@@ -572,6 +596,6 @@ export async function runEdrmImport(opts: EdrmImportOptions): Promise<ImportResu
     `UPDATE loadfile_imports SET doc_count=$2, page_count=$3, docs_done=$2, pages_done=$3, status='completed', phase='completed' WHERE id=$1`,
     [setId, docCount, totalPages]
   );
-  log(`EDRM import complete: ${docCount} documents, ${totalPages} rendered page(s), ${nativeCopied} native file(s) stored, ${placed} folder placement(s)${missingNatives ? `, ${missingNatives} missing native(s)` : ''}`);
-  return { setId, docCount, pageCount: totalPages };
+  log(`EDRM import complete: ${docCount} documents, ${totalPages} rendered page(s), ${nativeCopied} native file(s) stored, ${placed} folder placement(s)${missingNatives ? `, ${missingNatives} missing native(s)` : ''}${overwritten.length ? `, ${overwritten.length} existing control number(s) updated in place` : ''}`);
+  return { setId, docCount, pageCount: totalPages, overwritten };
 }

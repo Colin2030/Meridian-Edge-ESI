@@ -609,12 +609,30 @@ Errors return the appropriate HTTP status and a JSON body `{ "error": "..." }`.
 - **No processing is performed.** The API ingests packages that are *already*
   processed. It does not OCR, render, or otherwise transform your ESI — supply
   images and extracted text in the package as described above.
-- **Image filename uniqueness.** Image file names must be unique across the whole
-  package. Duplicates are reported in `collisions` on the `202` response and are
-  skipped.
-- **Upload size.** The upload endpoint accepts large multipart payloads (up to
-  512 MB and 2000 files per request). For very large packages already staged on
-  the server, prefer the [path ingest](#post-apiv1casescaseidimportspath).
+- **Image filename uniqueness.** Within a single request, image basenames must be
+  unique; any duplicates are reported in `collisions` on the `202` response and
+  skipped. Rendered images are stored namespaced per document (by control number)
+  in a per-case store, so a basename re-used *across* separate requests/chunks
+  does not corrupt data provided the control numbers are distinct.
+- **Cross-call control-number overlap.** Document identity within a case is
+  `(case_id, control_number)`. When a later request/chunk re-uses a control number
+  already present in the case (or duplicates one within the same request), that
+  document row is updated in place. As of 1.1.0 this is **reported** rather than
+  silently overwritten: the count and a sample of affected control numbers are
+  written to the import row's note (the `error` field returned by
+  `GET .../imports/:importId` and the import history), and recorded in the audit
+  log (`import.completed`). This makes sequential chunked imports into one case
+  auditable.
+- **Upload size.** There is **no application-level byte cap by default**
+  (`MAX_UPLOAD_BYTES=0`); uploads stream to disk, bounded only by available disk
+  space. The "512 MB" figure some shared demo environments enforce is an **edge
+  (nginx) limit, not an application limit** — it does not bind on an on-prem
+  install (the on-prem nginx template allows `client_max_body_size 64g` with
+  3600s timeouts). The only application-level per-request cap is the **file
+  count**, default **2,000**, configurable via `MAX_UPLOAD_FILES`. For
+  multi-terabyte matters prefer the
+  [path ingest](#post-apiv1casescaseidimportspath) against a share governed by
+  `INGEST_ALLOWED_ROOTS`.
 - **Long-lived connections.** The platform edge terminates idle connections after
   ~300s. Because ingest is asynchronous you never hold a long upload open waiting
   for processing — upload, then poll.

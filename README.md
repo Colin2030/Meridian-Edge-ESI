@@ -371,8 +371,13 @@ path and the CLI path produce identical results.
 
 **Notes & limits**
 
-- Upload limits (set in both the nginx vhost and multer): **512 MB** per request, up to 2000 files.
-  Keep `client_max_body_size` in `deploy/` in step with multer's `fileSize` if you change them.
+- Upload limits: there is **no application-level byte cap by default** (`MAX_UPLOAD_BYTES=0`; uploads
+  stream to disk). The **512 MB** figure is the shared demo environment's **nginx edge** limit, *not*
+  an application limit — it does not bind on-prem (the on-prem nginx template allows
+  `client_max_body_size 64g`). The only application-level per-request cap is the **file count**
+  (default **2,000**, configurable via `MAX_UPLOAD_FILES`). Set `MAX_UPLOAD_BYTES` to a positive
+  value only if you want a hard app-level byte cap, and keep `client_max_body_size` in `deploy/` in
+  step with it.
 - The background job runs **in-process** (single Node process) — fine for the PoC's import sizes; a
   dedicated job queue is on the production roadmap for very large deliverables.
 - Images are matched to `.OPT` references by **basename**, so nested zip folder layouts are handled.

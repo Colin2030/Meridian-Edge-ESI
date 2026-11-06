@@ -75,6 +75,27 @@ if (fs.existsSync(config.webDist)) {
 
 // error handler
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  // Multer upload-limit errors should surface as an actionable client error, not
+  // an opaque 500, so a chunked-import client can detect "chunk too large" and
+  // split further (or an admin can raise the cap). Both the cookie import route
+  // and the /api/v1 token route share the same multer instance.
+  if (err && err.name === 'MulterError') {
+    if (err.code === 'LIMIT_FILE_COUNT') {
+      return res.status(413).json({
+        error: `Too many files in one request (limit ${config.maxUploadFiles}). Split the import into smaller chunks, or raise MAX_UPLOAD_FILES on the server.`,
+        code: err.code,
+        limit: config.maxUploadFiles,
+      });
+    }
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: `A file exceeds the maximum upload size${config.maxUploadBytes > 0 ? ` (limit ${config.maxUploadBytes} bytes)` : ''}. Raise MAX_UPLOAD_BYTES on the server if this is expected.`,
+        code: err.code,
+        limit: config.maxUploadBytes,
+      });
+    }
+    return res.status(413).json({ error: `Upload rejected: ${err.message}`, code: err.code });
+  }
   // eslint-disable-next-line no-console
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error' });

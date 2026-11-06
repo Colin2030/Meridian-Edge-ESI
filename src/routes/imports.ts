@@ -39,11 +39,13 @@ const storage = multer.diskStorage({
 // we omit `fileSize` entirely so multer applies NO per-file cap and streams the
 // upload to disk (diskStorage), bounded only by available disk space on the
 // imports staging dir. A positive value enforces a hard byte cap.
+// The per-request FILE COUNT cap is config.maxUploadFiles (env MAX_UPLOAD_FILES,
+// default 2000) — the only application-level per-request cap enforced here.
 export const upload = multer({
   storage,
   limits: config.maxUploadBytes > 0
-    ? { fileSize: config.maxUploadBytes, files: 2000 }
-    : { files: 2000 },
+    ? { fileSize: config.maxUploadBytes, files: config.maxUploadFiles }
+    : { files: config.maxUploadFiles },
 });
 
 const IMAGE_EXTS = new Set(['.tif', '.tiff', '.pdf']);
@@ -123,11 +125,16 @@ function startEdrmJob(args: {
   (async () => {
     try {
       const res = await runEdrmImport(opts);
-      let note: string | null = null;
+      const notes: string[] = [];
       if (missing.length) {
         const sample = missing.slice(0, 8).join('; ');
-        note = `Completed with ${missing.length} missing native file reference(s): ${sample}${missing.length > 8 ? ' …' : ''}`;
+        notes.push(`Completed with ${missing.length} missing native file reference(s): ${sample}${missing.length > 8 ? ' …' : ''}`);
       }
+      if (res.overwritten.length) {
+        const sample = res.overwritten.slice(0, 8).join('; ');
+        notes.push(`${res.overwritten.length} document(s) re-used a control number already present in this case and were updated in place (chunk/import overlap): ${sample}${res.overwritten.length > 8 ? ' …' : ''}`);
+      }
+      const note: string | null = notes.length ? notes.join(' | ') : null;
       await query(`UPDATE loadfile_imports SET error=$2 WHERE id=$1`, [args.importId, note]);
       await audit({
         userId: args.importedBy, caseId: args.caseId, action: 'import.completed',
@@ -226,11 +233,16 @@ function startIngestJob(args: {
   (async () => {
     try {
       const res = await runImport(opts);
-      let note: string | null = null;
+      const notes: string[] = [];
       if (missing.length) {
         const sample = missing.slice(0, 8).join('; ');
-        note = `Completed with ${missing.length} missing image reference(s): ${sample}${missing.length > 8 ? ' …' : ''}`;
+        notes.push(`Completed with ${missing.length} missing image reference(s): ${sample}${missing.length > 8 ? ' …' : ''}`);
       }
+      if (res.overwritten.length) {
+        const sample = res.overwritten.slice(0, 8).join('; ');
+        notes.push(`${res.overwritten.length} document(s) re-used a control number already present in this case and were updated in place (chunk/import overlap): ${sample}${res.overwritten.length > 8 ? ' …' : ''}`);
+      }
+      const note: string | null = notes.length ? notes.join(' | ') : null;
       await query(`UPDATE loadfile_imports SET error=$2 WHERE id=$1`, [args.importId, note]);
       await audit({
         userId: args.importedBy, caseId: args.caseId, action: 'import.completed',

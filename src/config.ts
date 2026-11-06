@@ -14,6 +14,13 @@ export const config = {
   // imports staging dir becomes the real limit). Set MAX_UPLOAD_BYTES to a
   // positive number of bytes to enforce a hard cap (e.g. 53687091200 = 50 GB).
   maxUploadBytes: Math.max(0, parseInt(process.env.MAX_UPLOAD_BYTES || '0', 10) || 0),
+  // Maximum NUMBER of files accepted in a single multipart import request. This is
+  // the ONLY application-level per-request cap enforced by Meridian Edge (the
+  // "512 MB" figure some demo environments show is an nginx edge limit, not an
+  // application limit — see MAX_UPLOAD_BYTES above, default 0 = no app byte cap).
+  // Defaults to 2000; raise via MAX_UPLOAD_FILES when importing a large single
+  // Concordance/EDRM chunk whose file count exceeds the default.
+  maxUploadFiles: Math.max(1, parseInt(process.env.MAX_UPLOAD_FILES || '2000', 10) || 2000),
   // Directory where rendered page images and staged imports are stored.
   // Defaults to <cwd>/uploads; override with UPLOADS_DIR (absolute path) to keep
   // document data on a separate volume in a production deployment.
