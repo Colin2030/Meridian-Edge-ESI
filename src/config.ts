@@ -8,6 +8,12 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL || '',
   sessionSecret: process.env.SESSION_SECRET || 'dev-insecure-secret-change-me',
   enableOcr: (process.env.ENABLE_OCR || 'false').toLowerCase() === 'true',
+  // Maximum size (in bytes) of a single uploaded file on the HTTP import path.
+  // Forensic ESI deliveries are routinely multi-GB, so this defaults to 0 =
+  // NO application-level size cap (available disk space on UPLOADS_DIR / the
+  // imports staging dir becomes the real limit). Set MAX_UPLOAD_BYTES to a
+  // positive number of bytes to enforce a hard cap (e.g. 53687091200 = 50 GB).
+  maxUploadBytes: Math.max(0, parseInt(process.env.MAX_UPLOAD_BYTES || '0', 10) || 0),
   // Directory where rendered page images and staged imports are stored.
   // Defaults to <cwd>/uploads; override with UPLOADS_DIR (absolute path) to keep
   // document data on a separate volume in a production deployment.

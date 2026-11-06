@@ -80,10 +80,17 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(config.port, '127.0.0.1', () => {
+const server = app.listen(config.port, '127.0.0.1', () => {
   // eslint-disable-next-line no-console
   console.log(`Meridian Edge listening on http://127.0.0.1:${config.port} (env=${config.env})`);
   // Warm the licence cache at startup so the first request is not slowed and the
   // enforcement gate has state immediately.
   refreshLicenceCache().catch((e) => console.error('licence cache warm failed', e));
 });
+// Large ESI deliveries (multi-GB) can take a long time to stream in. Disable
+// Node's per-request timeout so a slow/large upload is not aborted by the app
+// itself, and keep headersTimeout >= keepAliveTimeout (a Node requirement).
+// The real time limits then come from the reverse proxy / any CDN in front.
+server.requestTimeout = 0; // 0 = no per-request timeout (default is 300s)
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 70_000;

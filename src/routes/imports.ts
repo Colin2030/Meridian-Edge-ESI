@@ -34,9 +34,16 @@ const storage = multer.diskStorage({
 });
 // Exported so the versioned public API (/api/v1) can reuse the exact same
 // multipart staging (one stable per-request dir for DAT/OPT/images together).
+// Forensic ESI deliveries are routinely multi-GB. The per-file size cap is
+// driven by config.maxUploadBytes (env MAX_UPLOAD_BYTES): when 0 (the default)
+// we omit `fileSize` entirely so multer applies NO per-file cap and streams the
+// upload to disk (diskStorage), bounded only by available disk space on the
+// imports staging dir. A positive value enforces a hard byte cap.
 export const upload = multer({
   storage,
-  limits: { fileSize: 512 * 1024 * 1024, files: 2000 }, // nginx vhost allows 512m bodies
+  limits: config.maxUploadBytes > 0
+    ? { fileSize: config.maxUploadBytes, files: 2000 }
+    : { files: 2000 },
 });
 
 const IMAGE_EXTS = new Set(['.tif', '.tiff', '.pdf']);
