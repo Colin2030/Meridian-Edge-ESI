@@ -1,6 +1,6 @@
 # Meridian Edge ESI — On-Premise Distribution
 
-**Meridian Edge Ltd** — a **view-only** ESI review platform for UK digital forensics, eDiscovery and regulatory investigations. Search, review, bookmark, comment on and organise *pre-processed* ESI (TIFFs/PDFs with Concordance `.DAT`/`.OPT` loadfiles and EDRM XML) on your own infrastructure, including secure or air-gapped networks.
+**Meridian Edge Ltd** — a **view-only** ESI review platform for digital forensics, eDiscovery and regulatory investigations. Search, review, bookmark, comment on and organise *pre-processed* ESI (TIFFs/PDFs with Concordance `.DAT`/`.OPT` loadfiles and EDRM XML) on your own infrastructure, including secure or air-gapped networks.
 
 This repository is the distribution point for the self-contained on-premise install package and its installation materials.
 
@@ -14,7 +14,7 @@ Get the latest self-contained package from the [**Releases**](https://github.com
 
 It bundles the compiled server, the built web interface and all production Node.js dependencies — **no internet or package registry is required on the target host**. The install scripts and the full runbook in this repository are also included inside the package.
 
-> **Licensing.** Meridian Edge is commercial, licensed software. It requires a valid, Meridian-signed licence file (`.melic`) issued by Meridian Edge Ltd for normal use — without one, standard users cannot access cases. A bootstrapped *system administrator* can log in to install the licence and manage the platform. To obtain a licence, contact Meridian Edge Ltd.
+> **Licensing.** Meridian Edge is commercial, licensed software. It requires a valid, Meridian-signed licence file (`.melic`) issued by Meridian Edge Ltd for normal use — without one, standard users cannot access cases. A bootstrapped *system administrator* can log in to install the licence and manage the platform. To obtain a licence, contact Meridian Edge Ltd (colin@meridianedge.co.uk)
 
 ---
 
