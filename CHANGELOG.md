@@ -5,6 +5,42 @@ Meridian Edge is a **view-only** ESI review platform; these releases change
 packaging, limits and tooling only — they add no ESI processing/forensic
 capability.
 
+## 1.2.0
+
+### Added
+- **Configurable per-request upload file-count limit.** The maximum number of
+  files accepted in a single import request is now configurable via
+  `MAX_UPLOAD_FILES` in `.env` (default `2000`), replacing the previous
+  hard-coded limit of 2000. Raise it when a single Concordance/EDRM chunk
+  legitimately contains more files than the default (for example a large
+  `images/` set). This is a file **count**, distinct from the
+  `MAX_UPLOAD_BYTES` byte-size cap.
+- **Chunked-import control-number overlap reporting.** When a chunked import
+  re-uses a control number that already exists, the document is updated **in
+  place** rather than duplicated, and any such overlap is now surfaced to
+  reviewers — recorded in the import's error/notes field and in the
+  `import.completed` audit detail — so overlapping control numbers across chunks
+  are visible after the run.
+
+### Changed
+- Exceeding the per-request file-count limit now returns a clean **HTTP 413**
+  response carrying a machine-readable `code` and the effective `limit`, instead
+  of an opaque HTTP 500.
+- Corrected stale upload-limit wording in the bundled documentation and
+  `.env.example`, and documented `MAX_UPLOAD_FILES` and the control-number
+  overlap reporting behaviour.
+
+### Notes
+- The platform remains **view-only**: this release adjusts upload limits, import
+  reporting and documentation only — it adds no ESI processing, collection or
+  forensic capability. Meridian Edge continues to import pre-processed loadfile
+  output produced by external engines.
+- Rebuilt from current source (compiled `dist/`, built `web/dist/`, re-vendored
+  production `node_modules/` via `npm ci --omit=dev`, pure-JS, air-gap ready);
+  migrations unchanged at **001–008**.
+- The package continues to embed **only** the Ed25519 licence **public** key
+  (`dist/lib/licensePublicKey.js`); the private signing key is never distributed.
+
 ## 1.1.0
 
 ### Added

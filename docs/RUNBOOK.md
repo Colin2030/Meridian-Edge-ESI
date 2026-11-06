@@ -47,6 +47,23 @@ The embedded **Ed25519 licence public key** (`dist/lib/licensePublicKey.js`) is
 included — it is required to verify uploaded `.melic` licences. The **private**
 signing key is held only by Meridian Edge Ltd and is never part of any deployment.
 
+### What's new in 1.2.0
+
+- **The per-request upload file-count cap is configurable** via `MAX_UPLOAD_FILES`
+  in `.env` (default `2000`), replacing the previous hard-coded limit of 2000. It
+  is a file **count** (distinct from the `MAX_UPLOAD_BYTES` byte-size cap); raise
+  it when a single Concordance/EDRM chunk legitimately contains more files.
+  Exceeding it now returns a clean **HTTP 413** (with a `code` and the effective
+  `limit`) instead of an opaque 500.
+- **Chunked-import control-number overlap reporting** — re-importing a control
+  number that already exists updates the document **in place** (no duplicate), and
+  the overlap is surfaced in the import's error/notes field and the
+  `import.completed` audit detail.
+- Upload-limit wording in this runbook and `.env.example` corrected.
+
+This release is packaging + limits + documentation changes only; the platform
+remains **view-only** for pre-processed ESI.
+
 ### What's new in 1.1.0
 
 - **Large / multi-GB dataset uploads** are supported. The cap is configurable via
@@ -256,6 +273,8 @@ sudo systemctl restart meridian-edge
 | `DATABASE_URL` | **yes** | — | PostgreSQL connection string `postgresql://USER:PASSWORD@HOST:PORT/DBNAME`. URL-encode special characters in the password. |
 | `SESSION_SECRET` | **yes** | insecure dev value | Secret used to sign authentication (JWT) tokens. Generate with `openssl rand -hex 48`. `install.sh` sets this automatically. Changing it invalidates all existing sessions. |
 | `UPLOADS_DIR` | no | `<prefix>/uploads` | Absolute path for rendered page images and staged imports. Point at a larger/separate volume if needed; the service user must own it. |
+| `MAX_UPLOAD_BYTES` | no | `0` (unlimited) | Largest single file, in **bytes**, accepted on the HTTP import/upload path. `0` = no application-level size cap (bounded only by free disk and the nginx `client_max_body_size`). Set a positive value to enforce a hard byte cap. |
+| `MAX_UPLOAD_FILES` | no | `2000` | Maximum **number** of files accepted in a single import request (a file count, not a byte size). Raise it when a single Concordance/EDRM chunk legitimately contains more files. Exceeding it returns HTTP 413 with a `code` and the effective `limit`. |
 | `INGEST_ALLOWED_ROOTS` | no | `/home/ubuntu,/mnt,/media,/srv` | Comma-separated absolute directories the server-side “network/folder location” import may read from. Restrict to your mounted ESI shares (e.g. `/mnt/esi-shares,/srv/esi`). |
 | `ENABLE_OCR` | no | `false` | When `true`, image-only pages are OCR'd at import for search. Requires `tesseract-ocr`. Does not alter source documents. |
 
