@@ -6,6 +6,7 @@ import { PdfView } from '../components/PdfView';
 import {
   ChevronLeft, ChevronRight, Bookmark, ZoomIn, ZoomOut, FileType2, FileText,
   MessageSquare, Tag as TagIcon, Plus, Send, Info, ArrowLeft, ArrowRight, X, Download,
+  MessagesSquare, CornerDownRight,
 } from 'lucide-react';
 
 interface Tag { id: number; name: string; colour: string; }
@@ -13,8 +14,13 @@ interface DocDetail {
   id: number; caseId: number; controlNumber: string; nativeType: string; nativeUrl: string | null;
   pageCount: number; hasText: boolean; extractedText: string | null; metadata: Record<string, string>;
   pages: { pageNo: number; url: string }[]; nativeUrlx?: string;
+  threadId: string | null; threadSubject: string | null; threadCount: number;
   review: { status: string; reviewed_at?: string; reviewed_by?: string };
   tags: Tag[]; bookmarked: boolean; comments: any[]; role: string;
+}
+interface ThreadMsg {
+  id: number; controlNumber: string; subject: string; from: string; to: string;
+  date: string; reviewStatus: string; current: boolean;
 }
 
 export default function DocumentViewer() {
@@ -28,11 +34,19 @@ export default function DocumentViewer() {
   const [tab, setTab] = useState<'metadata' | 'text' | 'comments'>('metadata');
   const [newComment, setNewComment] = useState('');
   const [showTagMenu, setShowTagMenu] = useState(false);
+  const [thread, setThread] = useState<ThreadMsg[]>([]);
 
   const load = useCallback(() => {
     api.get<DocDetail>(`/api/documents/${docId}`).then((d) => { setDoc(d); setPage(1); });
   }, [docId]);
   useEffect(() => { load(); }, [load]);
+  // Fetch the conversation thread siblings (chronological) for the thread panel.
+  useEffect(() => {
+    setThread([]);
+    api.get<{ messages: ThreadMsg[] }>(`/api/documents/${docId}/thread`)
+      .then((r) => setThread(r.messages || []))
+      .catch(() => setThread([]));
+  }, [docId]);
   useEffect(() => {
     api.get<any>(`/api/cases/${caseId}`).then((c) => setCaseTags(c.tags || []));
     api.get<{ documents: { id: number }[] }>(`/api/case/${caseId}/documents?limit=200&sort=control_number`)
@@ -201,6 +215,50 @@ export default function DocumentViewer() {
               </div>
             </div>
           </div>
+
+          {/* conversation thread panel — only for emails in a multi-message thread */}
+          {thread.length > 1 && (
+            <div className="card p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <MessagesSquare size={16} className="text-accent-dark" />
+                <h2 className="text-sm font-semibold text-navy-900">Conversation</h2>
+                <span className="badge bg-accent/10 text-accent-dark">{thread.length} messages</span>
+              </div>
+              {doc.threadSubject && (
+                <p className="text-xs text-slate-400 mb-2 truncate" title={doc.threadSubject}>{doc.threadSubject}</p>
+              )}
+              <ol className="space-y-0.5 max-h-[32vh] overflow-auto -mx-1">
+                {thread.map((msg, i) => {
+                  const trm = reviewMeta(msg.reviewStatus);
+                  return (
+                    <li key={msg.id}>
+                      <Link
+                        to={`/cases/${caseId}/documents/${msg.id}`}
+                        className={`flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition ${msg.current ? 'bg-accent/[0.08] ring-1 ring-accent/30' : 'hover:bg-slate-50'}`}
+                        title={msg.current ? 'Current message' : `Open ${msg.controlNumber}`}
+                      >
+                        <span className="mt-0.5 text-slate-300 shrink-0">
+                          {i === 0 ? <MessageSquare size={13} /> : <CornerDownRight size={13} />}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center justify-between gap-2">
+                            <span className={`truncate ${msg.current ? 'font-semibold text-navy-900' : 'text-slate-700'}`}>{msg.from || msg.controlNumber}</span>
+                            <span className="text-xs text-slate-400 whitespace-nowrap">{fmtDateTime(msg.date) || '—'}</span>
+                          </span>
+                          <span className="flex items-center gap-1.5 mt-0.5">
+                            <span className={`inline-block h-2 w-2 rounded-full ${trm.cls}`} title={trm.label} />
+                            <span className="text-xs text-slate-400 truncate">{msg.controlNumber}</span>
+                            {msg.current && <span className="text-[10px] uppercase tracking-wide text-accent-dark font-semibold">· viewing</span>}
+                          </span>
+                        </span>
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ol>
+              <p className="text-[11px] text-slate-400 mt-2">Grouped by subject, ordered by date sent.</p>
+            </div>
+          )}
 
           {/* tabs */}
           <div className="card">

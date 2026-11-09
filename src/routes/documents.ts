@@ -111,7 +111,10 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
   params.push(limit, offset);
   const sql = `
     SELECT d.id, d.control_number, d.native_type, d.page_count, d.has_text, d.created_at,
-           d.metadata, rs.status AS review_status, ${rankSelect}${extraSelect},
+           d.metadata, d.thread_id, d.thread_subject, rs.status AS review_status, ${rankSelect}${extraSelect},
+           CASE WHEN d.thread_id IS NULL THEN 1
+                ELSE (SELECT count(*)::int FROM documents dt WHERE dt.case_id=d.case_id AND dt.thread_id=d.thread_id)
+           END AS thread_count,
            EXISTS (SELECT 1 FROM bookmarks b WHERE b.document_id=d.id AND b.user_id=$${bmParam}) AS bookmarked,
            COALESCE((SELECT json_agg(json_build_object('id',t.id,'name',t.name,'colour',t.colour))
                      FROM document_tags dt JOIN tags t ON t.id=dt.tag_id WHERE dt.document_id=d.id), '[]') AS tags
@@ -275,13 +278,59 @@ router.get('/documents/:docId', requireAuth, async (req: AuthedRequest, res) => 
   const comments = (await query<any>(`SELECT c.id, c.body, c.created_at, u.display_name, u.username FROM comments c JOIN users u ON u.id=c.user_id WHERE c.document_id=$1 ORDER BY c.created_at ASC`, [docId])).rows;
 
   await audit({ userId: req.user!.id, caseId: doc.case_id, action: 'document_view', target: doc.control_number });
+  // Conversation thread (view-only): count other messages in the same thread so
+  // the viewer knows whether to offer a thread panel.
+  let threadCount = 1;
+  if (doc.thread_id) {
+    threadCount = (await query<any>(`SELECT count(*)::int AS n FROM documents WHERE case_id=$1 AND thread_id=$2`, [doc.case_id, doc.thread_id])).rows[0].n;
+  }
+
   res.json({
     id: doc.id, caseId: doc.case_id, controlNumber: doc.control_number,
     nativeType: doc.native_type, nativePath: doc.native_path, pageCount: doc.page_count,
     hasText: doc.has_text, extractedText: doc.extracted_text, metadata: doc.metadata,
+    threadId: doc.thread_id, threadSubject: doc.thread_subject, threadCount,
     pages: pages.map((p) => ({ pageNo: p.page_no, url: `/api/files/${encodeURI(p.image_path)}` })),
     nativeUrl: doc.native_path ? `/api/files/${encodeURI(doc.native_path)}` : null,
     review, tags, bookmarked, comments, role,
+  });
+});
+
+// Conversation thread siblings (read_only+): the other messages in this document's
+// email thread, ordered chronologically by Date Sent. Powers the thread panel.
+router.get('/documents/:docId/thread', requireAuth, async (req: AuthedRequest, res) => {
+  const docId = parseInt(req.params.docId, 10);
+  const { rows } = await query<any>(`SELECT case_id, thread_id FROM documents WHERE id=$1`, [docId]);
+  if (!rows.length) return res.status(404).json({ error: 'Document not found' });
+  const { case_id: caseId, thread_id: threadId } = rows[0];
+  const role = await requireAccess(req, caseId);
+  if (!role) return res.status(403).json({ error: 'No access to this case' });
+  if (!threadId) return res.json({ threadId: null, messages: [] });
+
+  // Order by the resolved document date (Concordance DATE then EDRM Date Sent),
+  // falling back to control number for stable ordering when dates are absent/equal.
+  const messages = (await query<any>(
+    `SELECT d.id, d.control_number, d.metadata,
+            COALESCE(NULLIF(d.metadata->>'DATE',''), d.metadata->>'Date Sent') AS date_sent,
+            rs.status AS review_status
+     FROM documents d LEFT JOIN review_states rs ON rs.document_id=d.id
+     WHERE d.case_id=$1 AND d.thread_id=$2
+     ORDER BY COALESCE(NULLIF(d.metadata->>'DATE',''), d.metadata->>'Date Sent') ASC NULLS LAST, d.control_number ASC`,
+    [caseId, threadId]
+  )).rows;
+
+  res.json({
+    threadId,
+    messages: messages.map((m) => ({
+      id: m.id,
+      controlNumber: m.control_number,
+      subject: m.metadata?.SUBJECT || m.metadata?.['Email Subject'] || m.metadata?.['File Name'] || m.control_number,
+      from: m.metadata?.FROM || m.metadata?.['Email From'] || '',
+      to: m.metadata?.TO || m.metadata?.['Email To'] || '',
+      date: m.date_sent || '',
+      reviewStatus: m.review_status || 'unreviewed',
+      current: m.id === docId,
+    })),
   });
 });
 

@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDate, reviewMeta, REVIEW_STATES } from '../lib/format';
-import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks, ClipboardList, BookMarked, FolderPlus, CheckCircle2 } from 'lucide-react';
+import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks, ClipboardList, BookMarked, FolderPlus, CheckCircle2, MessagesSquare } from 'lucide-react';
 import { CaseAdminPanel } from '../components/CaseAdminPanel';
 import { KeywordListPanel, KwOptions } from '../components/KeywordListPanel';
 import { ReportBuilder } from '../components/ReportBuilder';
@@ -14,6 +14,7 @@ interface Snippet { before: string; match: string; after: string; }
 interface DocRow {
   id: number; control_number: string; native_type: string; page_count: number; has_text: boolean;
   metadata: Record<string, string>; review_status: string; bookmarked: boolean; tags: Tag[];
+  thread_id: string | null; thread_subject: string | null; thread_count: number;
   snippet?: Snippet | null;
 }
 
@@ -412,7 +413,17 @@ export default function CaseWorkspace() {
                     <div className="truncate">{fromVal || '—'}</div>
                     <div className="truncate text-xs text-slate-400">{toVal || ''}</div>
                   </td>
-                  <td className="px-3 py-2.5 text-slate-700 max-w-[260px] truncate" title={subjVal}>{subjVal || '—'}</td>
+                  <td className="px-3 py-2.5 text-slate-700 max-w-[260px]">
+                    <div className="flex items-center gap-1.5">
+                      <span className="truncate" title={subjVal}>{subjVal || '—'}</span>
+                      {d.thread_id && d.thread_count > 1 && (
+                        <span className="inline-flex items-center gap-0.5 shrink-0 rounded-full bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent-dark"
+                          title={`Part of a conversation of ${d.thread_count} messages`}>
+                          <MessagesSquare size={11} />{d.thread_count}
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-3 py-2.5">
                     <span className="inline-flex items-center gap-1 text-slate-500">
                       {d.native_type === 'pdf' ? <FileType2 size={14} className="text-rose-500" /> : <FileText size={14} className="text-sky-600" />}

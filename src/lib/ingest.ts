@@ -4,6 +4,7 @@ import { execFileSync } from 'child_process';
 import { config } from '../config';
 import { query, withTx } from '../db';
 import { parseDat, parseOpt, buildFieldMap, OptDocument, parseEdrmXml, EdrmFolderNode } from './loadfile';
+import { deriveThread } from './threading';
 
 export interface ImportOptions {
   caseId: number;
@@ -226,14 +227,29 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
       delete metadata[fieldMap.text_path];
     }
 
+    // Email conversation threading (view-only): for email documents, group by the
+    // normalised subject so reviewers can follow a reply chain. An email is
+    // identified by having both a sender and a subject, or an .eml/.msg native.
+    let threadId: string | null = null;
+    let threadSubject: string | null = null;
+    const subjectVal = fieldMap.subject ? row[fieldMap.subject] : '';
+    const fromVal = fieldMap.from ? row[fieldMap.from] : '';
+    const filenameVal = fieldMap.filename ? row[fieldMap.filename] : '';
+    const looksLikeEmail = !!(fromVal && subjectVal) || /\.(eml|msg)$/i.test(filenameVal || '') || /\.(eml|msg)$/i.test(control || '');
+    if (looksLikeEmail && subjectVal) {
+      const t = deriveThread(opts.caseId, subjectVal);
+      if (t) { threadId = t.threadId; threadSubject = t.threadSubject; }
+    }
+
     const docRow = await query<{ id: number; was_overwrite: boolean }>(
-      `INSERT INTO documents (case_id, set_id, control_number, native_type, native_path, page_count, has_text, extracted_text, metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `INSERT INTO documents (case_id, set_id, control_number, native_type, native_path, page_count, has_text, extracted_text, metadata, thread_id, thread_subject)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        ON CONFLICT (case_id, control_number) DO UPDATE SET set_id=EXCLUDED.set_id, native_type=EXCLUDED.native_type,
          native_path=EXCLUDED.native_path, page_count=EXCLUDED.page_count, has_text=EXCLUDED.has_text,
-         extracted_text=EXCLUDED.extracted_text, metadata=EXCLUDED.metadata
+         extracted_text=EXCLUDED.extracted_text, metadata=EXCLUDED.metadata,
+         thread_id=EXCLUDED.thread_id, thread_subject=EXCLUDED.thread_subject
        RETURNING id, (xmax <> 0) AS was_overwrite`,
-      [opts.caseId, setId, control, nativeType, nativeRel, pageImagePaths.length, hasText, extractedText || null, JSON.stringify(metadata)]
+      [opts.caseId, setId, control, nativeType, nativeRel, pageImagePaths.length, hasText, extractedText || null, JSON.stringify(metadata), threadId, threadSubject]
     );
     const docId = docRow.rows[0].id;
     // xmax<>0 on the ON CONFLICT path => the row already existed and was updated
@@ -523,15 +539,30 @@ export async function runEdrmImport(opts: EdrmImportOptions): Promise<ImportResu
     }
     totalPages += pageImagePaths.length;
 
+    // Email conversation threading (view-only): for email documents (DocType
+    // "Message" / MIME message/rfc822, or where email fields are present), group by
+    // the normalised subject so reviewers can follow a reply chain.
+    let threadId: string | null = null;
+    let threadSubject: string | null = null;
+    const isEmail = d.docType === 'Message'
+      || (d.mimeType || '').toLowerCase() === 'message/rfc822'
+      || !!metadata['Email From'] || !!metadata['Email Subject'];
+    const emailSubject = metadata['Email Subject'] || metadata['Subject'] || '';
+    if (isEmail && emailSubject) {
+      const t = deriveThread(opts.caseId, emailSubject);
+      if (t) { threadId = t.threadId; threadSubject = t.threadSubject; }
+    }
+
     // --- insert document -----------------------------------------------------
     const docRow = await query<{ id: number; was_overwrite: boolean }>(
-      `INSERT INTO documents (case_id, set_id, control_number, native_type, native_path, page_count, has_text, extracted_text, metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `INSERT INTO documents (case_id, set_id, control_number, native_type, native_path, page_count, has_text, extracted_text, metadata, thread_id, thread_subject)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        ON CONFLICT (case_id, control_number) DO UPDATE SET set_id=EXCLUDED.set_id, native_type=EXCLUDED.native_type,
          native_path=EXCLUDED.native_path, page_count=EXCLUDED.page_count, has_text=EXCLUDED.has_text,
-         extracted_text=EXCLUDED.extracted_text, metadata=EXCLUDED.metadata
+         extracted_text=EXCLUDED.extracted_text, metadata=EXCLUDED.metadata,
+         thread_id=EXCLUDED.thread_id, thread_subject=EXCLUDED.thread_subject
        RETURNING id, (xmax <> 0) AS was_overwrite`,
-      [opts.caseId, setId, control, nativeType, nativeRel, pageImagePaths.length, hasText, extractedText || null, JSON.stringify(metadata)]
+      [opts.caseId, setId, control, nativeType, nativeRel, pageImagePaths.length, hasText, extractedText || null, JSON.stringify(metadata), threadId, threadSubject]
     );
     const dbId = docRow.rows[0].id;
     docIdToDbId.set(d.docId, dbId);
