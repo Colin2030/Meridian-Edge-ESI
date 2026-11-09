@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
 import { fmtDate, fmtDateTime, reviewMeta } from '../lib/format';
+import { displayName, displayType, displayDate, displaySubject, displayFrom, displayTo } from '../lib/displayFields';
 import { ChevronLeft, ChevronRight, BookMarked, Link2, Check, Trash2, FileText, FileType2, CircleUser, Filter } from 'lucide-react';
 
 interface Tag { id: number; name: string; colour: string; }
@@ -122,21 +123,26 @@ export default function BinderPage() {
             ) : docs.map((d) => {
               const m = d.metadata || {};
               const rm = reviewMeta(d.review_status);
+              const nameVal = displayName(m, d.control_number);
+              const fromVal = displayFrom(m);
+              const toVal = displayTo(m);
+              const subjVal = displaySubject(m);
               return (
                 <tr key={d.id} className="hover:bg-accent/[0.03] transition">
                   <td className="px-3 py-2.5">
-                    <Link to={`/cases/${caseId}/documents/${d.id}`} className="font-medium text-navy-900 hover:text-accent-dark">{d.control_number}</Link>
+                    <Link to={`/cases/${caseId}/documents/${d.id}`} className="font-medium text-navy-900 hover:text-accent-dark">{nameVal}</Link>
+                    {nameVal !== d.control_number && <div className="text-xs text-slate-400 truncate max-w-[220px]" title={d.control_number}>{d.control_number}</div>}
                   </td>
-                  <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDate(m.DATE)}</td>
-                  <td className="px-3 py-2.5 text-slate-600 max-w-[200px] truncate" title={`${m.FROM || ''} → ${m.TO || ''}`}>
-                    <div className="truncate">{m.FROM || '—'}</div>
-                    <div className="truncate text-xs text-slate-400">{m.TO || ''}</div>
+                  <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDate(displayDate(m))}</td>
+                  <td className="px-3 py-2.5 text-slate-600 max-w-[200px] truncate" title={`${fromVal || ''} → ${toVal || ''}`}>
+                    <div className="truncate">{fromVal || '—'}</div>
+                    <div className="truncate text-xs text-slate-400">{toVal || ''}</div>
                   </td>
-                  <td className="px-3 py-2.5 text-slate-700 max-w-[260px] truncate" title={m.SUBJECT}>{m.SUBJECT || m.FILENAME || '—'}</td>
+                  <td className="px-3 py-2.5 text-slate-700 max-w-[260px] truncate" title={subjVal}>{subjVal || '—'}</td>
                   <td className="px-3 py-2.5">
                     <span className="inline-flex items-center gap-1 text-slate-500">
                       {d.native_type === 'pdf' ? <FileType2 size={14} className="text-rose-500" /> : <FileText size={14} className="text-sky-600" />}
-                      {(m.DOCTYPE || d.native_type || '').toString()}
+                      {displayType(m, d.native_type)}
                     </span>
                   </td>
                   <td className="px-3 py-2.5 text-slate-500">{d.page_count}</td>

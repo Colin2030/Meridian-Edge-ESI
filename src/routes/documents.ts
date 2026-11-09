@@ -7,6 +7,7 @@ import { config } from '../config';
 import { audit } from '../lib/audit';
 import { AuthedRequest, requireAuth, requireCaseRole } from '../middleware/auth';
 import { fileTypeBucketSql } from '../lib/fileType';
+import { displayDateSql, displaySubjectSql } from '../lib/displayFields';
 import {
   parsePatternOptions, buildPattern, regexOperator, validatePattern,
   queryWithTimeout, PatternError, buildJsRegex, makeSnippet, leadingExcerpt,
@@ -78,22 +79,23 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
     params.push(tagId);
     where.push(`EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id=d.id AND dt.tag_id=$${params.length})`);
   }
-  // Resolve the document date from the Concordance (.DAT) 'DATE' field first, then fall
-  // back to the EDRM XML 'Date Sent' field so date-range filtering also works for XML imports.
+  // Resolve the document date from whichever date field variant a loadfile uses
+  // (DATE / Date Sent / DATESENT / DateSent) so date-range filtering works across
+  // all schemas (Concordance, EDRM XML, email corpora). See displayFields.ts.
   if (dateFrom) {
     params.push(dateFrom);
-    where.push(`COALESCE(NULLIF(d.metadata->>'DATE',''), d.metadata->>'Date Sent') >= $${params.length}`);
+    where.push(`${displayDateSql('d.metadata')} >= $${params.length}`);
   }
   if (dateTo) {
     params.push(dateTo);
-    where.push(`COALESCE(NULLIF(d.metadata->>'DATE',''), d.metadata->>'Date Sent') <= $${params.length}`);
+    where.push(`${displayDateSql('d.metadata')} <= $${params.length}`);
   }
   if (fileTypes.length) {
     // Restrict to documents whose derived file-type bucket is in the selected
     // set (OR/union). lower() around the bucket makes the 'Unknown' bucket match
     // the lowercased input; the extension itself is already lowercased.
     params.push(fileTypes);
-    where.push(`lower(${fileTypeBucketSql('d.metadata')}) = ANY($${params.length}::text[])`);
+    where.push(`lower(${fileTypeBucketSql('d.metadata', 'd.native_type')}) = ANY($${params.length}::text[])`);
   }
   params.push(u.id);
   const bmParam = params.length;
@@ -311,11 +313,12 @@ router.get('/documents/:docId/thread', requireAuth, async (req: AuthedRequest, r
   // falling back to control number for stable ordering when dates are absent/equal.
   const messages = (await query<any>(
     `SELECT d.id, d.control_number, d.metadata,
-            COALESCE(NULLIF(d.metadata->>'DATE',''), d.metadata->>'Date Sent') AS date_sent,
+            ${displayDateSql('d.metadata')} AS date_sent,
+            ${displaySubjectSql('d.metadata')} AS subject,
             rs.status AS review_status
      FROM documents d LEFT JOIN review_states rs ON rs.document_id=d.id
      WHERE d.case_id=$1 AND d.thread_id=$2
-     ORDER BY COALESCE(NULLIF(d.metadata->>'DATE',''), d.metadata->>'Date Sent') ASC NULLS LAST, d.control_number ASC`,
+     ORDER BY ${displayDateSql('d.metadata')} ASC NULLS LAST, d.control_number ASC`,
     [caseId, threadId]
   )).rows;
 
@@ -324,7 +327,7 @@ router.get('/documents/:docId/thread', requireAuth, async (req: AuthedRequest, r
     messages: messages.map((m) => ({
       id: m.id,
       controlNumber: m.control_number,
-      subject: m.metadata?.SUBJECT || m.metadata?.['Email Subject'] || m.metadata?.['File Name'] || m.control_number,
+      subject: m.subject || m.control_number,
       from: m.metadata?.FROM || m.metadata?.['Email From'] || '',
       to: m.metadata?.TO || m.metadata?.['Email To'] || '',
       date: m.date_sent || '',

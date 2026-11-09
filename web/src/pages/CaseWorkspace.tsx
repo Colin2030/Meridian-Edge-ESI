@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDate, reviewMeta, REVIEW_STATES } from '../lib/format';
+import { displayName, displayType, displayDate, displaySubject, displayFrom, displayTo } from '../lib/displayFields';
 import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks, ClipboardList, BookMarked, FolderPlus, CheckCircle2, MessagesSquare } from 'lucide-react';
 import { CaseAdminPanel } from '../components/CaseAdminPanel';
 import { KeywordListPanel, KwOptions } from '../components/KeywordListPanel';
@@ -382,12 +383,14 @@ export default function CaseWorkspace() {
               <tr><td colSpan={canBinder ? 10 : 9} className="py-16 text-center text-slate-400"><Filter className="mx-auto mb-2 text-slate-300" size={28} />No documents match your filters.</td></tr>
             ) : docs.map((d) => {
               const m = d.metadata || {};
-              // Resolve list columns from Concordance (.DAT) field names first, then fall
-              // back to EDRM XML field labels so XML-imported docs populate too.
-              const dateVal = m.DATE || m['Date Sent'];
-              const fromVal = m.FROM || m['Email From'];
-              const toVal = m.TO || m['Email To'];
-              const subjVal = m.SUBJECT || m['Email Subject'] || m.FILENAME || m['File Name'];
+              // Resolve list columns via the shared robust field mapping so every
+              // loadfile schema (Concordance, email corpora, EDRM) populates.
+              const dateVal = displayDate(m);
+              const fromVal = displayFrom(m);
+              const toVal = displayTo(m);
+              const subjVal = displaySubject(m);
+              const nameVal = displayName(m, d.control_number);
+              const typeVal = displayType(m, d.native_type);
               const rm = reviewMeta(d.review_status);
               const snip = mode === 'pattern' ? d.snippet : null;
               return (
@@ -405,8 +408,8 @@ export default function CaseWorkspace() {
                     </button>
                   </td>
                   <td className="px-3 py-2.5">
-                    <Link to={`/cases/${caseId}/documents/${d.id}`} className="font-medium text-navy-900 hover:text-accent-dark">{m['File Name'] || d.control_number}</Link>
-                    {m['File Name'] && <div className="text-xs text-slate-400 truncate max-w-[220px]" title={d.control_number}>{d.control_number}</div>}
+                    <Link to={`/cases/${caseId}/documents/${d.id}`} className="font-medium text-navy-900 hover:text-accent-dark">{nameVal}</Link>
+                    {nameVal !== d.control_number && <div className="text-xs text-slate-400 truncate max-w-[220px]" title={d.control_number}>{d.control_number}</div>}
                   </td>
                   <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDate(dateVal)}</td>
                   <td className="px-3 py-2.5 text-slate-600 max-w-[200px] truncate" title={`${fromVal || ''} → ${toVal || ''}`}>
@@ -427,7 +430,7 @@ export default function CaseWorkspace() {
                   <td className="px-3 py-2.5">
                     <span className="inline-flex items-center gap-1 text-slate-500">
                       {d.native_type === 'pdf' ? <FileType2 size={14} className="text-rose-500" /> : <FileText size={14} className="text-sky-600" />}
-                      {(m.DOCTYPE || d.native_type || '').toString()}
+                      {typeVal}
                     </span>
                   </td>
                   <td className="px-3 py-2.5 text-slate-500">{d.page_count}</td>

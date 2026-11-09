@@ -6,7 +6,7 @@ import { fmtDateTime } from '../lib/format';
 import {
   ChevronLeft, UploadCloud, FileText, FileSpreadsheet, FileType2, FileArchive,
   X, CheckCircle2, AlertTriangle, Loader2, Info, History, ArrowRight,
-  Network, Server,
+  Network, Server, RefreshCw, RotateCcw,
 } from 'lucide-react';
 
 interface CaseInfo { id: number; name: string; case_number: string; role: string; }
@@ -71,6 +71,39 @@ export default function AddCaseData() {
       .catch((e) => { if (e.status === 403) setDenied(true); });
   }, [caseId]);
   useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  // Self-service retry / reset for stuck imports.
+  const [actionBusy, setActionBusy] = useState<number | null>(null);
+  const [actionErr, setActionErr] = useState<string>('');
+
+  const retryImport = useCallback(async (id: number) => {
+    setActionErr('');
+    setActionBusy(id);
+    try {
+      await api.post(`/api/cases/${caseId}/imports/${id}/retry`, {});
+      loadHistory();
+      // Poll the history briefly so progress is seen advancing again.
+      setTimeout(loadHistory, 2500);
+      setTimeout(loadHistory, 6000);
+    } catch (e: any) {
+      setActionErr(e?.message || 'Could not retry this import.');
+    } finally {
+      setActionBusy(null);
+    }
+  }, [caseId, loadHistory]);
+
+  const resetImport = useCallback(async (id: number) => {
+    setActionErr('');
+    setActionBusy(id);
+    try {
+      await api.post(`/api/cases/${caseId}/imports/${id}/reset`, {});
+      loadHistory();
+    } catch (e: any) {
+      setActionErr(e?.message || 'Could not reset this import.');
+    } finally {
+      setActionBusy(null);
+    }
+  }, [caseId, loadHistory]);
 
   // Guard: only managers/admins. (API also enforces; this is UX only.)
   const canManage = info?.role === 'system_admin' || info?.role === 'case_manager';
@@ -423,14 +456,17 @@ export default function AddCaseData() {
                 <th className="px-3 py-2.5 text-right">Docs</th>
                 <th className="px-3 py-2.5 text-right">Pages</th>
                 <th className="px-3 py-2.5">Status</th>
+                <th className="px-3 py-2.5 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {history.length === 0 ? (
-                <tr><td colSpan={6} className="py-10 text-center text-slate-400">No imports yet for this case.</td></tr>
+                <tr><td colSpan={7} className="py-10 text-center text-slate-400">No imports yet for this case.</td></tr>
               ) : history.map((h) => {
                 const st = h.status;
                 const cls = st === 'completed' ? 'bg-emerald-50 text-emerald-700' : st === 'failed' ? 'bg-rose-50 text-rose-700' : 'bg-amber-50 text-amber-700';
+                const canRetry = st === 'processing' || st === 'failed';
+                const canReset = st === 'processing' || st === 'failed';
                 return (
                   <tr key={h.id} className="hover:bg-slate-50">
                     <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDateTime(h.imported_at)}</td>
@@ -444,12 +480,42 @@ export default function AddCaseData() {
                     <td className="px-3 py-2.5 text-right text-slate-600">{h.doc_count}</td>
                     <td className="px-3 py-2.5 text-right text-slate-600">{h.page_count}</td>
                     <td className="px-3 py-2.5"><span className={`badge ${cls}`}>{PHASE_LABEL[st] || st}</span></td>
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {canRetry && (
+                          <button
+                            onClick={() => retryImport(h.id)}
+                            disabled={actionBusy === h.id}
+                            className="btn-outline inline-flex items-center gap-1 px-2 py-1 text-xs"
+                            title="Re-run this import from its staged source"
+                          >
+                            {actionBusy === h.id ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Retry
+                          </button>
+                        )}
+                        {canReset && (
+                          <button
+                            onClick={() => resetImport(h.id)}
+                            disabled={actionBusy === h.id}
+                            className="btn-outline inline-flex items-center gap-1 px-2 py-1 text-xs"
+                            title="Mark this interrupted import as failed (keeps it for audit)"
+                          >
+                            <RotateCcw size={13} /> Reset
+                          </button>
+                        )}
+                        {!canRetry && !canReset && <span className="text-xs text-slate-300">—</span>}
+                      </div>
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
+        {actionErr && (
+          <div className="mt-2 text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-3 py-2 inline-flex items-center gap-1">
+            <AlertTriangle size={13} /> {actionErr}
+          </div>
+        )}
       </div>
     </div>
   );

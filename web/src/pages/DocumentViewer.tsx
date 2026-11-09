@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDateTime, reviewMeta, REVIEW_STATES } from '../lib/format';
+import { displayName, displayType, displaySubject } from '../lib/displayFields';
 import { PdfView } from '../components/PdfView';
 import {
   ChevronLeft, ChevronRight, Bookmark, ZoomIn, ZoomOut, FileType2, FileText,
@@ -112,10 +113,11 @@ export default function DocumentViewer() {
           <div>
             <div className="flex items-center gap-2">
               {isPdf ? <FileType2 size={18} className="text-rose-500" /> : <FileText size={18} className="text-sky-600" />}
-              <h1 className="text-lg font-bold text-navy-900">{m['File Name'] || doc.controlNumber}</h1>
+              <h1 className="text-lg font-bold text-navy-900">{displayName(m, doc.controlNumber)}</h1>
+              <span className="badge bg-slate-100 text-slate-600">{displayType(m, doc.nativeType)}</span>
               <span className={`badge ${rm.cls}`}>{rm.label}</span>
             </div>
-            <div className="text-xs text-slate-400">{m.SUBJECT || m.FILENAME || (m['File Name'] ? doc.controlNumber : '')}</div>
+            <div className="text-xs text-slate-400">{displaySubject(m) || (displayName(m, doc.controlNumber) !== doc.controlNumber ? doc.controlNumber : '')}</div>
           </div>
         </div>
         <div className="flex items-center gap-2">

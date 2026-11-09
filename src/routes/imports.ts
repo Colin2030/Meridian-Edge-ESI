@@ -498,6 +498,175 @@ export const importStatusHandler = async (req: AuthedRequest, res: any) => {
 };
 router.get('/:caseId/imports/:importId', requireAuth, requireCaseRole('case_manager'), importStatusHandler);
 
+// ---- Self-service retry / reset for stuck imports ---------------------------
+// These re-run or clear an EXISTING import of an already-uploaded, pre-processed
+// loadfile. They add NO new processing capability — retry uses the identical
+// runImport/runEdrmImport path the upload handler uses, and is duplicate-safe
+// (upsert on (case_id, control_number)).
+
+const RESET_MESSAGE =
+  'Reset: processing was interrupted by a service restart and the source chunk is no longer staged — please re-upload this chunk to complete it.';
+
+/**
+ * Locate the staged _incoming_* source directory for an import, if it is still on
+ * disk. Matches by the original uploaded file name(s) recorded on the row (chunk
+ * zips are uniquely named per chunk), falling back to the sole incoming dir when
+ * there is exactly one and it carries the expected .DAT/.XML loadfile. Returns the
+ * absolute stage dir path, or null when the source is gone.
+ */
+function findStagedSource(caseId: number, imp: any): string | null {
+  const caseDir = path.join(IMPORTS_ROOT, String(caseId));
+  if (!fs.existsSync(caseDir)) return null;
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(caseDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name.startsWith('_incoming_'))
+      .map((e) => path.join(caseDir, e.name));
+  } catch { return null; }
+  if (dirs.length === 0) return null;
+
+  const wantNames: string[] = Array.isArray(imp.original_files)
+    ? imp.original_files.map((f: any) => (f && f.name ? path.basename(String(f.name)) : '')).filter(Boolean)
+    : [];
+  const loadfile = imp.dat_filename || imp.xml_filename || null;
+
+  // 1. Strong match: a dir whose top level contains one of the original uploaded files.
+  if (wantNames.length) {
+    for (const dir of dirs) {
+      let top: string[];
+      try { top = fs.readdirSync(dir); } catch { continue; }
+      if (wantNames.some((n) => top.includes(n))) return dir;
+    }
+  }
+
+  // 2. Fallback: exactly one incoming dir that actually carries the loadfile.
+  if (dirs.length === 1 && loadfile) {
+    const dir = dirs[0];
+    const extracted = path.join(dir, '_extracted');
+    const hasLoadfile =
+      (fs.existsSync(path.join(extracted, loadfile))) ||
+      (fs.existsSync(dir) && fs.readdirSync(dir).includes(loadfile)) ||
+      (fs.existsSync(extracted) && walk(extracted).some((p) => path.basename(p) === loadfile));
+    if (hasLoadfile) return dir;
+  }
+  return null;
+}
+
+// ---- POST /api/cases/:caseId/imports/:importId/reset ------------------------
+// Mark an orphaned processing/failed row as failed (keeps the row for audit).
+router.post('/:caseId/imports/:importId/reset', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
+  const caseId = parseInt(req.params.caseId, 10);
+  const importId = parseInt(req.params.importId, 10);
+  const { rows } = await query<any>(
+    `SELECT id, status FROM loadfile_imports WHERE id=$1 AND case_id=$2`,
+    [importId, caseId]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'Import not found' });
+  const imp = rows[0];
+  if (!['processing', 'failed'].includes(imp.status)) {
+    return res.status(409).json({ error: `Only imports that are still processing or already failed can be reset (this one is "${imp.status}").` });
+  }
+  await query(
+    `UPDATE loadfile_imports SET status='failed', phase='failed', error=$2 WHERE id=$1`,
+    [importId, RESET_MESSAGE]
+  );
+  await audit({
+    userId: req.user!.id, caseId, action: 'import.reset',
+    target: `import:${importId}`, detail: RESET_MESSAGE,
+  });
+  res.json({ ok: true, id: importId, status: 'failed', phase: 'failed', error: RESET_MESSAGE });
+});
+
+// ---- POST /api/cases/:caseId/imports/:importId/retry ------------------------
+// Re-run an existing import from its staged source on disk, if still present.
+router.post('/:caseId/imports/:importId/retry', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
+  const caseId = parseInt(req.params.caseId, 10);
+  const importId = parseInt(req.params.importId, 10);
+  const { rows } = await query<any>(
+    `SELECT id, name, status, dat_filename, opt_filename, xml_filename, source_kind, original_files, imported_by
+       FROM loadfile_imports WHERE id=$1 AND case_id=$2`,
+    [importId, caseId]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'Import not found' });
+  const imp = rows[0];
+  if (!['processing', 'failed'].includes(imp.status)) {
+    return res.status(409).json({ error: `Only imports that are still processing or already failed can be retried (this one is "${imp.status}").` });
+  }
+
+  const stageDir = findStagedSource(caseId, imp);
+  if (!stageDir) {
+    return res.status(409).json({
+      error: 'The source for this import is no longer staged on the server. Please re-upload this chunk to complete it.',
+    });
+  }
+
+  // Ensure the archive is extracted (re-extract if only the zip remains).
+  const extractedDir = path.join(stageDir, '_extracted');
+  try {
+    if (!fs.existsSync(extractedDir)) {
+      const zips = fs.readdirSync(stageDir).filter((f) => f.toLowerCase().endsWith('.zip'));
+      if (zips.length) {
+        fs.mkdirSync(extractedDir, { recursive: true });
+        for (const z of zips) {
+          execFileSync('unzip', ['-o', '-qq', path.join(stageDir, z), '-d', extractedDir], { stdio: 'ignore' });
+        }
+      }
+    }
+  } catch {
+    return res.status(409).json({ error: 'The staged source archive for this import could not be read. Please re-upload this chunk.' });
+  }
+
+  // Gather candidate files from the extracted tree (avoid walking the bulky
+  // flattened _images dir). Fall back to the stage dir root if no _extracted.
+  const scanRoot = fs.existsSync(extractedDir) ? extractedDir : stageDir;
+  const allFiles = walk(scanRoot).filter((p) => !p.toLowerCase().endsWith('.zip'));
+
+  const setName = imp.name || 'Re-run import';
+
+  // EDRM XML path (mirror the upload handler).
+  const edrmXmlPath = detectEdrmXml(allFiles);
+  if (edrmXmlPath) {
+    const sourceRoot = path.dirname(edrmXmlPath);
+    await query(`UPDATE loadfile_imports SET status='pending', phase='parsing', error=NULL WHERE id=$1`, [importId]);
+    await audit({
+      userId: req.user!.id, caseId, action: 'import.retry',
+      target: `import:${importId}`, detail: `${setName} — re-run from staged source — EDRM XML=${path.basename(edrmXmlPath)}`,
+    });
+    startEdrmJob({ importId, caseId, xmlPath: edrmXmlPath, sourceRoot, importedBy: imp.imported_by ?? req.user!.id, setName });
+    return res.status(202).json({ importId, status: 'pending', format: 'edrm', retried: true });
+  }
+
+  // Concordance DAT/OPT path.
+  const datFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.dat');
+  const optFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.opt');
+  if (datFiles.length === 0) {
+    return res.status(409).json({ error: 'No .DAT loadfile was found in the staged source for this import. Please re-upload this chunk.' });
+  }
+  const datPath = datFiles[0];
+  const optPath = optFiles.length ? optFiles[0] : undefined;
+
+  // Reuse the already-flattened _images dir if present; otherwise flatten now.
+  const imagesDir = path.join(stageDir, '_images');
+  if (!fs.existsSync(imagesDir) || fs.readdirSync(imagesDir).length === 0) {
+    flattenImages(allFiles, imagesDir);
+  }
+
+  const ocr = config.enableOcr;
+  await query(`UPDATE loadfile_imports SET status='pending', phase='parsing', error=NULL WHERE id=$1`, [importId]);
+  await audit({
+    userId: req.user!.id, caseId, action: 'import.retry',
+    target: `import:${importId}`, detail: `${setName} — re-run from staged source — DAT=${path.basename(datPath)}${optPath ? ', OPT=' + path.basename(optPath) : ', no OPT'}`,
+  });
+
+  // Kick the SAME background ingest job used by the upload route (reuses the row).
+  startIngestJob({
+    importId, caseId, datPath, optPath, imagesDir,
+    importedBy: imp.imported_by ?? req.user!.id, setName, ocr,
+  });
+
+  res.status(202).json({ importId, status: 'pending', retried: true, datFile: path.basename(datPath), optFile: optPath ? path.basename(optPath) : null });
+});
+
 // ---- GET /api/cases/:caseId/imports — history list --------------------------
 router.get('/:caseId/imports', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
   const caseId = parseInt(req.params.caseId, 10);

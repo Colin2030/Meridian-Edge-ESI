@@ -3,7 +3,7 @@ import ExcelJS from 'exceljs';
 import { query, withTx } from '../db';
 import { audit } from '../lib/audit';
 import { AuthedRequest, requireAuth, requireCaseRole, getCaseRole, requireCanCreateCases } from '../middleware/auth';
-import { fileTypeExtSql } from '../lib/fileType';
+import { fileTypeBucketSql } from '../lib/fileType';
 
 const router = Router();
 
@@ -91,10 +91,10 @@ router.get('/:caseId/eca', requireAuth, requireCaseRole('read_only'), async (req
   // the final extension lowercased. The [^.] guard requires a non-dot character
   // before the final dot, so leading-dot dotfiles (e.g. .gitignore) yield NULL
   // rather than a spurious extension. NULL => 'Unknown' via COALESCE below.
-  const extExpr = fileTypeExtSql();
+  const bucketExpr = fileTypeBucketSql();
   const totals = (await query<any>(
     `SELECT count(*)::int AS total_documents,
-            count(*) FILTER (WHERE ${extExpr} = 'eml')::int AS email_count,
+            count(*) FILTER (WHERE lower(${bucketExpr}) IN ('email','eml'))::int AS email_count,
             count(DISTINCT NULLIF(trim(metadata->>'CUSTODIAN'), ''))::int AS custodian_count
      FROM documents WHERE case_id=$1`, [caseId]
   )).rows[0];
@@ -112,9 +112,9 @@ router.get('/:caseId/eca', requireAuth, requireCaseRole('read_only'), async (req
   // File-type breakdown by extension derived from the original filename, most
   // documents first. Documents with no usable extension classify as 'Unknown'.
   const fileTypes = (await query<any>(
-    `SELECT COALESCE(${extExpr}, 'Unknown') AS file_type, count(*)::int AS count
+    `SELECT ${bucketExpr} AS file_type, count(*)::int AS count
      FROM documents WHERE case_id=$1
-     GROUP BY COALESCE(${extExpr}, 'Unknown')
+     GROUP BY ${bucketExpr}
      ORDER BY count(*) DESC, file_type ASC`, [caseId]
   )).rows;
 
