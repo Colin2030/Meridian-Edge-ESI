@@ -1,5 +1,6 @@
+import path from 'path';
+import { fork } from 'child_process';
 import { query } from '../db';
-import { runClaimedImport } from './importRunner';
 
 // ---------------------------------------------------------------------------
 // Durable, resumable, serialised background import worker.
@@ -11,6 +12,15 @@ import { runClaimedImport } from './importRunner';
 // process died is left as status='processing' with a stale heartbeat, and the
 // worker RESUMES it (re-running the idempotent ingest from the still-staged
 // source). If the source is gone, it is marked failed with a re-upload message.
+//
+// Each claimed import is rendered in a forked CHILD process
+// (importWorkerChild.ts). The ingest pipeline converts images synchronously
+// (execFileSync), which would otherwise block the main event loop and freeze the
+// HTTP API and this worker's heartbeat for the duration of a render. Forking keeps
+// the parent responsive; the parent refreshes the heartbeat and awaits the child
+// so serialisation is preserved (the next import is only claimed after the child
+// exits). A service restart kills parent and child together (same cgroup), so no
+// orphaned render survives — boot reconciliation then resumes the interrupted row.
 //
 // Lifecycle: queued -> processing -> completed | failed.
 // ---------------------------------------------------------------------------
@@ -91,6 +101,25 @@ function startHeartbeat(importId: number): NodeJS.Timeout {
   }, HEARTBEAT_INTERVAL_MS);
 }
 
+/**
+ * Render one import in a forked child process, resolving only once the child has
+ * exited. Keeps the heavy synchronous render off the parent's event loop while
+ * still being awaited (so the queue stays strictly serial).
+ *   exit 0 -> completed · exit 2 -> source missing (already marked failed) · else -> error
+ */
+function runInChild(importId: number): Promise<{ ok: boolean; reason?: 'missing' }> {
+  return new Promise((resolve, reject) => {
+    const childPath = path.join(__dirname, 'importWorkerChild.js');
+    const child = fork(childPath, [String(importId)]);
+    child.on('exit', (code) => {
+      if (code === 0) resolve({ ok: true });
+      else if (code === 2) resolve({ ok: false, reason: 'missing' });
+      else reject(new Error(`render child exited with code ${code}`));
+    });
+    child.on('error', (err) => reject(err));
+  });
+}
+
 async function processOne(row: ClaimedRow): Promise<void> {
   const label = `import ${row.id} (case ${row.case_id}${row.name ? `, "${row.name}"` : ''})`;
   // attempts was just incremented by the claim; a freshly-queued row claims at
@@ -102,14 +131,19 @@ async function processOne(row: ClaimedRow): Promise<void> {
   }
   const hb = startHeartbeat(row.id);
   try {
-    const res = await runClaimedImport(row);
+    const res = await runInChild(row.id);
     if (res.ok) log(`COMPLETED ${label}`);
     else if (res.reason === 'missing') log(`FAILED ${label} — staged source gone; marked for re-upload`);
   } catch (e: any) {
     const msg = (e?.message || String(e)).slice(0, 500);
     log(`FAILED ${label} — ${msg}`);
+    // The child persists its own detailed error on a hard failure; only fall back
+    // to this generic message if it died without recording one (e.g. was killed).
     try {
-      await query(`UPDATE loadfile_imports SET status='failed', phase='failed', error=$2 WHERE id=$1`, [row.id, msg]);
+      await query(
+        `UPDATE loadfile_imports SET status='failed', phase='failed', error=COALESCE(error,$2) WHERE id=$1 AND status<>'completed'`,
+        [row.id, msg]
+      );
     } catch { /* best effort */ }
   } finally {
     clearInterval(hb);
