@@ -14,6 +14,7 @@ interface ImportRow {
   id: number; name: string; dat_filename: string | null; opt_filename: string | null; xml_filename?: string | null;
   status: string; phase: string | null; doc_count: number; page_count: number;
   docs_total?: number; docs_done?: number; pages_done?: number;
+  enqueued_at?: string | null; attempts?: number; queue_position?: number | null;
   error: string | null; source_kind: string | null; imported_at: string; imported_by_name: string | null;
 }
 
@@ -37,6 +38,12 @@ function humanSize(n: number): string {
 
 const PHASE_LABEL: Record<string, string> = {
   pending: 'Queued', parsing: 'Reading loadfile', rendering: 'Rendering pages',
+  completed: 'Complete', failed: 'Failed',
+};
+
+// Badge label keyed on the import STATUS (queued -> processing -> completed/failed).
+const STATUS_LABEL: Record<string, string> = {
+  queued: 'Queued', processing: 'Processing', pending: 'Queued',
   completed: 'Complete', failed: 'Failed',
 };
 
@@ -71,6 +78,15 @@ export default function AddCaseData() {
       .catch((e) => { if (e.status === 403) setDenied(true); });
   }, [caseId]);
   useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  // Keep the queue overview + history live while anything is queued or processing,
+  // so the active item's progress and the queue order update without a reload.
+  useEffect(() => {
+    const hasActive = history.some((h) => h.status === 'queued' || h.status === 'processing');
+    if (!hasActive) return;
+    const t = setInterval(loadHistory, 4000);
+    return () => clearInterval(t);
+  }, [history, loadHistory]);
 
   // Self-service retry / reset for stuck imports.
   const [actionBusy, setActionBusy] = useState<number | null>(null);
@@ -168,7 +184,7 @@ export default function AddCaseData() {
       if (xhr.status === 202) {
         const r = JSON.parse(xhr.responseText);
         setFiles([]);
-        setJob({ id: r.importId, name: '', dat_filename: r.datFile || r.xmlFile || null, opt_filename: r.optFile || null, xml_filename: r.xmlFile || null, status: 'pending', phase: 'parsing', doc_count: 0, page_count: 0, error: null, source_kind: r.format === 'edrm' ? 'edrm' : null, imported_at: new Date().toISOString(), imported_by_name: user?.displayName || null });
+        setJob({ id: r.importId, name: '', dat_filename: r.datFile || r.xmlFile || null, opt_filename: r.optFile || null, xml_filename: r.xmlFile || null, status: 'queued', phase: 'parsing', doc_count: 0, page_count: 0, error: null, source_kind: r.format === 'edrm' ? 'edrm' : null, imported_at: new Date().toISOString(), imported_by_name: user?.displayName || null });
         pollStatus(r.importId);
       } else {
         let msg = 'Upload failed.';
@@ -191,7 +207,7 @@ export default function AddCaseData() {
         { path: p, name: pathName.trim() || undefined, ocr: pathOcr },
       );
       setPathValue(''); setPathName(''); setPathOcr(false);
-      setJob({ id: r.importId, name: '', dat_filename: r.datFile || r.xmlFile || null, opt_filename: r.optFile || null, xml_filename: r.xmlFile || null, status: 'pending', phase: 'parsing', doc_count: 0, page_count: 0, error: null, source_kind: r.format === 'edrm' ? 'edrm' : 'path', imported_at: new Date().toISOString(), imported_by_name: user?.displayName || null });
+      setJob({ id: r.importId, name: '', dat_filename: r.datFile || r.xmlFile || null, opt_filename: r.optFile || null, xml_filename: r.xmlFile || null, status: 'queued', phase: 'parsing', doc_count: 0, page_count: 0, error: null, source_kind: r.format === 'edrm' ? 'edrm' : 'path', imported_at: new Date().toISOString(), imported_by_name: user?.displayName || null });
       pollStatus(r.importId);
     } catch (e: any) {
       setErr(e?.message || 'The location could not be read by the server.');
@@ -415,9 +431,20 @@ export default function AddCaseData() {
         <div className="card p-6 mt-4">
           {job.status !== 'completed' && job.status !== 'failed' && (
             <div>
-              <div className="flex items-center gap-2 text-navy-900 font-semibold"><Loader2 size={18} className="animate-spin text-accent" /> Importing…</div>
-              <p className="text-sm text-slate-500 mt-1">{PHASE_LABEL[job.phase || 'pending'] || 'Working'}{job.docs_total ? ` — document ${job.docs_done || 0} of ${job.docs_total} (${job.pages_done || 0} pages)` : ''}</p>
-              <div className="h-2 rounded-full bg-slate-100 overflow-hidden mt-3"><div className="h-full bg-accent transition-all" style={{ width: `${Math.max(pct, 6)}%` }} /></div>
+              <div className="flex items-center gap-2 text-navy-900 font-semibold">
+                <Loader2 size={18} className="animate-spin text-accent" /> {job.status === 'queued' ? 'Queued for import…' : 'Importing…'}
+              </div>
+              <p className="text-sm text-slate-500 mt-1">
+                {job.status === 'queued'
+                  ? 'Waiting for the import worker. Large sets are processed one at a time and survive a server restart, so this part will start — or resume — automatically.'
+                  : `${PHASE_LABEL[job.phase || 'pending'] || 'Working'}${job.docs_total ? ` — document ${job.docs_done || 0} of ${job.docs_total} (${job.pages_done || 0} pages)` : ''}`}
+              </p>
+              <div className="h-2 rounded-full bg-slate-100 overflow-hidden mt-3">
+                <div
+                  className={`h-full transition-all ${job.status === 'queued' ? 'bg-accent/40 animate-pulse' : 'bg-accent'}`}
+                  style={{ width: job.status === 'queued' ? '100%' : `${Math.max(pct, 6)}%` }}
+                />
+              </div>
             </div>
           )}
           {job.status === 'completed' && (
@@ -443,6 +470,46 @@ export default function AddCaseData() {
         </div>
       )}
 
+      {/* Import queue overview — which part is processing now, and what is waiting */}
+      {(() => {
+        const processing = history.filter((h) => h.status === 'processing');
+        const queued = history
+          .filter((h) => h.status === 'queued')
+          .sort((a, b) => (a.queue_position || 0) - (b.queue_position || 0));
+        if (processing.length === 0 && queued.length === 0) return null;
+        const labelOf = (h: ImportRow) => h.name || h.dat_filename || h.xml_filename || `Import ${h.id}`;
+        return (
+          <div className="mt-6 card p-4 border-l-4 border-l-accent">
+            <div className="flex items-center gap-2 text-sm font-semibold text-navy-900">
+              <Loader2 size={15} className="animate-spin text-accent" /> Import queue
+              <span className="font-normal text-slate-400">· processed one at a time, restart-safe</span>
+            </div>
+            <div className="mt-2 space-y-1.5 text-sm text-slate-600">
+              {processing.map((h) => (
+                <div key={h.id} className="flex items-center gap-2 flex-wrap">
+                  <span className="badge bg-amber-50 text-amber-700">Processing</span>
+                  <span className="font-medium text-navy-900">{labelOf(h)}</span>
+                  <span className="text-slate-500">{h.docs_total ? `— ${h.docs_done || 0}/${h.docs_total} documents` : '— starting…'}</span>
+                </div>
+              ))}
+              {queued.length > 0 && (
+                <div className="flex items-start gap-2 flex-wrap">
+                  <span className="badge bg-accent/10 text-accent-dark whitespace-nowrap">Queued · {queued.length}</span>
+                  <span className="text-slate-600">
+                    {queued.map((h, i) => (
+                      <span key={h.id}>{i > 0 ? ', ' : ''}<span className="font-medium text-navy-900">{labelOf(h)}</span></span>
+                    ))}
+                  </span>
+                </div>
+              )}
+              {processing.length === 0 && queued.length > 0 && (
+                <div className="text-xs text-slate-400">The worker will start the first queued item within a few seconds.</div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Import history */}
       <div className="mt-8">
         <div className="flex items-center gap-2 mb-3 text-navy-900"><History size={18} /><h2 className="font-semibold">Import history</h2></div>
@@ -464,9 +531,12 @@ export default function AddCaseData() {
                 <tr><td colSpan={7} className="py-10 text-center text-slate-400">No imports yet for this case.</td></tr>
               ) : history.map((h) => {
                 const st = h.status;
-                const cls = st === 'completed' ? 'bg-emerald-50 text-emerald-700' : st === 'failed' ? 'bg-rose-50 text-rose-700' : 'bg-amber-50 text-amber-700';
+                const cls = st === 'completed' ? 'bg-emerald-50 text-emerald-700'
+                  : st === 'failed' ? 'bg-rose-50 text-rose-700'
+                  : st === 'queued' ? 'bg-accent/10 text-accent-dark'
+                  : 'bg-amber-50 text-amber-700';
                 const canRetry = st === 'processing' || st === 'failed';
-                const canReset = st === 'processing' || st === 'failed';
+                const canReset = st === 'queued' || st === 'processing' || st === 'failed';
                 return (
                   <tr key={h.id} className="hover:bg-slate-50">
                     <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDateTime(h.imported_at)}</td>
@@ -479,7 +549,15 @@ export default function AddCaseData() {
                     <td className="px-3 py-2.5 text-slate-500">{h.imported_by_name || '—'}</td>
                     <td className="px-3 py-2.5 text-right text-slate-600">{h.doc_count}</td>
                     <td className="px-3 py-2.5 text-right text-slate-600">{h.page_count}</td>
-                    <td className="px-3 py-2.5"><span className={`badge ${cls}`}>{PHASE_LABEL[st] || st}</span></td>
+                    <td className="px-3 py-2.5">
+                      <span className={`badge ${cls}`}>{STATUS_LABEL[st] || PHASE_LABEL[st] || st}</span>
+                      {st === 'queued' && h.queue_position ? (
+                        <div className="text-xs text-slate-400 mt-0.5">Position {h.queue_position} in queue</div>
+                      ) : null}
+                      {st === 'processing' && h.docs_total ? (
+                        <div className="text-xs text-slate-400 mt-0.5">{h.docs_done || 0}/{h.docs_total} docs</div>
+                      ) : null}
+                    </td>
                     <td className="px-3 py-2.5">
                       <div className="flex items-center justify-end gap-1.5">
                         {canRetry && (

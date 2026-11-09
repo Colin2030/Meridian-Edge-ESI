@@ -6,13 +6,13 @@ import multer from 'multer';
 import { config } from '../config';
 import { query } from '../db';
 import { AuthedRequest, requireAuth, requireCaseRole } from '../middleware/auth';
-import { runImport, runEdrmImport } from '../lib/ingest';
-import { isEdrmXml } from '../lib/loadfile';
 import { audit } from '../lib/audit';
+import {
+  IMPORTS_ROOT, RESET_MESSAGE, SOURCE_GONE_MESSAGE,
+  walk, flattenImages, detectEdrmXml, findStagedSource,
+} from '../lib/importRunner';
 
 const router = Router();
-
-const IMPORTS_ROOT = path.join(config.uploadsDir, 'imports');
 
 // ---- Multer: stage uploads on disk under a per-case incoming dir -------------
 const storage = multer.diskStorage({
@@ -48,109 +48,6 @@ export const upload = multer({
     : { files: config.maxUploadFiles },
 });
 
-const IMAGE_EXTS = new Set(['.tif', '.tiff', '.pdf']);
-
-/** Recursively collect all files under a directory. */
-function walk(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walk(full));
-    else out.push(full);
-  }
-  return out;
-}
-
-/** Flatten image files (tiff/pdf) into a single images/ dir so basename resolution works regardless of archive nesting. */
-function flattenImages(files: string[], imagesDir: string): { copied: number; collisions: string[] } {
-  fs.mkdirSync(imagesDir, { recursive: true });
-  let copied = 0;
-  const collisions: string[] = [];
-  for (const f of files) {
-    const ext = path.extname(f).toLowerCase();
-    if (!IMAGE_EXTS.has(ext)) continue;
-    const dest = path.join(imagesDir, path.basename(f));
-    if (fs.existsSync(dest)) { collisions.push(path.basename(f)); continue; }
-    fs.copyFileSync(f, dest);
-    copied++;
-  }
-  return { copied, collisions };
-}
-
-/**
- * Detect an EDRM XML 1.2 loadfile among the candidate files. Returns the path of
- * the first `.xml` whose content sniffs as EDRM XML (checked cheaply from the file
- * head), or null when none is present. Used to autodetect EDRM vs Concordance DAT.
- */
-function detectEdrmXml(files: string[]): string | null {
-  for (const f of files) {
-    if (path.extname(f).toLowerCase() !== '.xml') continue;
-    let head = '';
-    try {
-      const fd = fs.openSync(f, 'r');
-      try {
-        const buf = Buffer.alloc(8192);
-        const n = fs.readSync(fd, buf, 0, buf.length, 0);
-        head = buf.subarray(0, n).toString('utf8');
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch { continue; }
-    if (isEdrmXml(head)) return f;
-  }
-  return null;
-}
-
-// ---- Background job: run the EDRM XML ingest pipeline ------------------------
-function startEdrmJob(args: {
-  importId: number; caseId: number; xmlPath: string; sourceRoot: string;
-  importedBy: number; setName: string;
-}) {
-  const warnings: string[] = [];
-  const missing: string[] = [];
-  const opts = {
-    caseId: args.caseId,
-    xmlPath: args.xmlPath,
-    sourceRoot: args.sourceRoot,
-    importedBy: args.importedBy,
-    setName: args.setName,
-    setId: args.importId,
-    log: (m: string) => {
-      const mm = m.trim();
-      if (mm.startsWith('! missing native')) { missing.push(mm.replace(/^!\s*/, '')); }
-      else if (mm.startsWith('!')) { warnings.push(mm.replace(/^!\s*/, '')); }
-    },
-  };
-  // Fire-and-forget; errors are captured onto the import row.
-  (async () => {
-    try {
-      const res = await runEdrmImport(opts);
-      const notes: string[] = [];
-      if (missing.length) {
-        const sample = missing.slice(0, 8).join('; ');
-        notes.push(`Completed with ${missing.length} missing native file reference(s): ${sample}${missing.length > 8 ? ' …' : ''}`);
-      }
-      if (res.overwritten.length) {
-        const sample = res.overwritten.slice(0, 8).join('; ');
-        notes.push(`${res.overwritten.length} document(s) re-used a control number already present in this case and were updated in place (chunk/import overlap): ${sample}${res.overwritten.length > 8 ? ' …' : ''}`);
-      }
-      const note: string | null = notes.length ? notes.join(' | ') : null;
-      await query(`UPDATE loadfile_imports SET error=$2 WHERE id=$1`, [args.importId, note]);
-      await audit({
-        userId: args.importedBy, caseId: args.caseId, action: 'import.completed',
-        target: `import:${args.importId}`,
-        detail: `${res.docCount} documents (EDRM XML, ${args.setName})${note ? ' — ' + note : ''}`,
-      });
-    } catch (e: any) {
-      const msg = (e?.message || String(e)).slice(0, 500);
-      await query(`UPDATE loadfile_imports SET status='failed', phase='failed', error=$2 WHERE id=$1`, [args.importId, msg]);
-      await audit({
-        userId: args.importedBy, caseId: args.caseId, action: 'import.failed',
-        target: `import:${args.importId}`, detail: msg,
-      });
-    }
-  })();
-}
 
 // ---- Server-side path validation (network / folder location source) ---------
 // Resolves symlinks and `..`, confirms the path exists and is readable, and
@@ -207,58 +104,6 @@ function validateIngestPath(input: string): PathCheck {
   return { ok: false, status: 400, error: 'The path is neither a folder nor a file the server can read.' };
 }
 
-// ---- Background job: run the existing ingest pipeline ------------------------
-function startIngestJob(args: {
-  importId: number; caseId: number; datPath: string; optPath?: string; imagesDir: string;
-  importedBy: number; setName: string; ocr: boolean;
-}) {
-  const warnings: string[] = [];
-  const missing: string[] = [];
-  const opts = {
-    caseId: args.caseId,
-    datPath: args.datPath,
-    optPath: args.optPath,
-    imagesDir: args.imagesDir,
-    importedBy: args.importedBy,
-    setName: args.setName,
-    ocr: args.ocr,
-    setId: args.importId,
-    log: (m: string) => {
-      const mm = m.trim();
-      if (mm.startsWith('! missing image')) { missing.push(mm.replace(/^!\s*/, '')); }
-      else if (mm.startsWith('!')) { warnings.push(mm.replace(/^!\s*/, '')); }
-    },
-  };
-  // Fire-and-forget; errors are captured onto the import row.
-  (async () => {
-    try {
-      const res = await runImport(opts);
-      const notes: string[] = [];
-      if (missing.length) {
-        const sample = missing.slice(0, 8).join('; ');
-        notes.push(`Completed with ${missing.length} missing image reference(s): ${sample}${missing.length > 8 ? ' …' : ''}`);
-      }
-      if (res.overwritten.length) {
-        const sample = res.overwritten.slice(0, 8).join('; ');
-        notes.push(`${res.overwritten.length} document(s) re-used a control number already present in this case and were updated in place (chunk/import overlap): ${sample}${res.overwritten.length > 8 ? ' …' : ''}`);
-      }
-      const note: string | null = notes.length ? notes.join(' | ') : null;
-      await query(`UPDATE loadfile_imports SET error=$2 WHERE id=$1`, [args.importId, note]);
-      await audit({
-        userId: args.importedBy, caseId: args.caseId, action: 'import.completed',
-        target: `import:${args.importId}`,
-        detail: `${res.docCount} documents, ${res.pageCount} pages (${args.setName})${note ? ' — ' + note : ''}`,
-      });
-    } catch (e: any) {
-      const msg = (e?.message || String(e)).slice(0, 500);
-      await query(`UPDATE loadfile_imports SET status='failed', phase='failed', error=$2 WHERE id=$1`, [args.importId, msg]);
-      await audit({
-        userId: args.importedBy, caseId: args.caseId, action: 'import.failed',
-        target: `import:${args.importId}`, detail: msg,
-      });
-    }
-  })();
-}
 
 // ---- POST /api/cases/:caseId/imports — upload + kick ingest ------------------
 // RBAC: case_manager or above on the case (system_admin passes globally).
@@ -303,23 +148,23 @@ export const uploadImportHandler = async (req: AuthedRequest, res: any) => {
   // natives across intact.
   const edrmXmlPath = detectEdrmXml(allFiles);
   if (edrmXmlPath) {
-    const sourceRoot = path.dirname(edrmXmlPath);
     const setName = (req.body?.name as string)?.trim() || path.basename(edrmXmlPath);
+    // Enqueue only — the durable worker renders this one at a time and the row
+    // survives a restart (resumed from the staged source). Return 202 promptly.
     const ins = await query<{ id: number }>(
-      `INSERT INTO loadfile_imports (case_id, name, xml_filename, imported_by, status, phase, source_kind, original_files)
-       VALUES ($1,$2,$3,$4,'pending','parsing','edrm',$5) RETURNING id`,
+      `INSERT INTO loadfile_imports (case_id, name, xml_filename, imported_by, status, phase, source_kind, original_files, enqueued_at)
+       VALUES ($1,$2,$3,$4,'queued','parsing','edrm',$5, now()) RETURNING id`,
       [caseId, setName, path.basename(edrmXmlPath), req.user!.id, JSON.stringify(originalFiles)]
     );
     const importId = ins.rows[0].id;
     await audit({
       userId: req.user!.id, caseId, action: 'import.started',
       target: `import:${importId}`,
-      detail: `${setName} — EDRM XML=${path.basename(edrmXmlPath)}`,
+      detail: `${setName} — EDRM XML=${path.basename(edrmXmlPath)} (queued)`,
     });
-    startEdrmJob({ importId, caseId, xmlPath: edrmXmlPath, sourceRoot, importedBy: req.user!.id, setName });
     return res.status(202).json({
       importId,
-      status: 'pending',
+      status: 'queued',
       format: 'edrm',
       xmlFile: path.basename(edrmXmlPath),
     });
@@ -342,13 +187,14 @@ export const uploadImportHandler = async (req: AuthedRequest, res: any) => {
     // No images and no OPT — nothing renderable. Still allow (metadata-only) but warn.
   }
 
-  const ocr = req.query.ocr === 'true' || config.enableOcr;
   const setName = (req.body?.name as string)?.trim() || path.basename(datPath);
+  void imagesDir; // flattened above so the worker finds _images/ when it claims this row
 
-  // Create the import row up front (status 'pending') so the UI can poll immediately.
+  // Create the import row as 'queued' so the durable worker renders it (one at a
+  // time, restart-safe). The UI polls the same importId. Return 202 promptly.
   const ins = await query<{ id: number }>(
-    `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, status, phase, source_kind, original_files)
-     VALUES ($1,$2,$3,$4,$5,'pending','parsing',$6,$7) RETURNING id`,
+    `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, status, phase, source_kind, original_files, enqueued_at)
+     VALUES ($1,$2,$3,$4,$5,'queued','parsing',$6,$7, now()) RETURNING id`,
     [caseId, setName, path.basename(datPath), optPath ? path.basename(optPath) : null, req.user!.id, sourceKind, JSON.stringify(originalFiles)]
   );
   const importId = ins.rows[0].id;
@@ -356,17 +202,12 @@ export const uploadImportHandler = async (req: AuthedRequest, res: any) => {
   await audit({
     userId: req.user!.id, caseId, action: 'import.started',
     target: `import:${importId}`,
-    detail: `${setName} — DAT=${path.basename(datPath)}${optPath ? ', OPT=' + path.basename(optPath) : ', no OPT'}, ${copied} image file(s)${collisions.length ? ', ' + collisions.length + ' name collision(s) skipped' : ''}`,
-  });
-
-  startIngestJob({
-    importId, caseId, datPath, optPath, imagesDir,
-    importedBy: req.user!.id, setName, ocr,
+    detail: `${setName} — DAT=${path.basename(datPath)}${optPath ? ', OPT=' + path.basename(optPath) : ', no OPT'}, ${copied} image file(s)${collisions.length ? ', ' + collisions.length + ' name collision(s) skipped' : ''} (queued)`,
   });
 
   res.status(202).json({
     importId,
-    status: 'pending',
+    status: 'queued',
     datFile: path.basename(datPath),
     optFile: optPath ? path.basename(optPath) : null,
     imageCount: copied,
@@ -404,24 +245,24 @@ export const pathImportHandler = async (req: AuthedRequest, res: any) => {
     // companion) — the on-disk tree at the network/folder location is read as-is.
     const edrmXmlPath = detectEdrmXml(allFiles);
     if (edrmXmlPath) {
-      const edrmRoot = path.dirname(edrmXmlPath);
       const setName = (req.body?.name as string)?.trim() || path.basename(edrmXmlPath);
+      // Enqueue as a 'path' import: the worker re-resolves the loadfile from the
+      // recorded source location (original_files[0].path) when it claims the row.
       const ins = await query<{ id: number }>(
-        `INSERT INTO loadfile_imports (case_id, name, xml_filename, imported_by, status, phase, source_kind, original_files)
-         VALUES ($1,$2,$3,$4,'pending','parsing','edrm',$5) RETURNING id`,
+        `INSERT INTO loadfile_imports (case_id, name, xml_filename, imported_by, status, phase, source_kind, original_files, enqueued_at)
+         VALUES ($1,$2,$3,$4,'queued','parsing','path',$5, now()) RETURNING id`,
         [caseId, setName, path.basename(edrmXmlPath), req.user!.id, JSON.stringify([{ path: sourceRoot, xml: path.basename(edrmXmlPath) }])]
       );
       const importId = ins.rows[0].id;
       await audit({
         userId: req.user!.id, caseId, action: 'import.started',
         target: `import:${importId}`,
-        detail: `${setName} — network/folder location "${sourceRoot}" — EDRM XML=${path.basename(edrmXmlPath)}`,
+        detail: `${setName} — network/folder location "${sourceRoot}" — EDRM XML=${path.basename(edrmXmlPath)} (queued)`,
       });
-      startEdrmJob({ importId, caseId, xmlPath: edrmXmlPath, sourceRoot: edrmRoot, importedBy: req.user!.id, setName });
-      cleanup(); // EDRM reads natives directly from the source location, not the local stage dir
+      cleanup(); // worker reads natives directly from the source location, not the local stage dir
       return res.status(202).json({
         importId,
-        status: 'pending',
+        status: 'queued',
         format: 'edrm',
         xmlFile: path.basename(edrmXmlPath),
         sourceKind: 'path',
@@ -437,18 +278,16 @@ export const pathImportHandler = async (req: AuthedRequest, res: any) => {
       return res.status(400).json({ error: 'No .DAT loadfile found at that location. A Concordance .DAT metadata file is required.' });
     }
     const optPath = optFiles.length ? optFiles[0] : undefined;
+    const imageCount = allFiles.filter((p) => ['.tif', '.tiff', '.pdf'].includes(path.extname(p).toLowerCase())).length;
 
-    // 4. Copy TIFF/PDF images into local _images/ so rendering reads from local disk.
-    const imagesDir = path.join(stageDir, '_images');
-    const { copied, collisions } = flattenImages(allFiles, imagesDir);
-
-    const ocr = req.body?.ocr === true || req.body?.ocr === 'true' || config.enableOcr;
     const setName = (req.body?.name as string)?.trim() || path.basename(datPath);
 
-    // 5. Record the import (source_kind='path', original_files holds the source path for audit/UI).
+    // Record the import as 'queued' (source_kind='path'); when the worker claims
+    // the row it re-resolves the loadfile and flattens images from the recorded
+    // source location, so no local image copy is needed here.
     const ins = await query<{ id: number }>(
-      `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, status, phase, source_kind, original_files)
-       VALUES ($1,$2,$3,$4,$5,'pending','parsing',$6,$7) RETURNING id`,
+      `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, status, phase, source_kind, original_files, enqueued_at)
+       VALUES ($1,$2,$3,$4,$5,'queued','parsing',$6,$7, now()) RETURNING id`,
       [caseId, setName, path.basename(datPath), optPath ? path.basename(optPath) : null, req.user!.id, 'path', JSON.stringify([{ path: sourceRoot, dat: path.basename(datPath) }])]
     );
     const importId = ins.rows[0].id;
@@ -456,22 +295,17 @@ export const pathImportHandler = async (req: AuthedRequest, res: any) => {
     await audit({
       userId: req.user!.id, caseId, action: 'import.started',
       target: `import:${importId}`,
-      detail: `${setName} — network/folder location "${sourceRoot}" — DAT=${path.basename(datPath)}${optPath ? ', OPT=' + path.basename(optPath) : ', no OPT'}, ${copied} image file(s)${collisions.length ? ', ' + collisions.length + ' name collision(s) skipped' : ''}`,
+      detail: `${setName} — network/folder location "${sourceRoot}" — DAT=${path.basename(datPath)}${optPath ? ', OPT=' + path.basename(optPath) : ', no OPT'}, ${imageCount} image file(s) (queued)`,
     });
 
-    // 6. Kick the SAME background ingest job used by the upload route.
-    startIngestJob({
-      importId, caseId, datPath, optPath, imagesDir,
-      importedBy: req.user!.id, setName, ocr,
-    });
+    cleanup(); // worker reads/flattens from the source location, not the local stage dir
 
     return res.status(202).json({
       importId,
-      status: 'pending',
+      status: 'queued',
       datFile: path.basename(datPath),
       optFile: optPath ? path.basename(optPath) : null,
-      imageCount: copied,
-      collisions,
+      imageCount,
       sourceKind: 'path',
     });
   } catch (e: any) {
@@ -488,7 +322,8 @@ export const importStatusHandler = async (req: AuthedRequest, res: any) => {
   const { rows } = await query(
     `SELECT i.id, i.name, i.dat_filename, i.opt_filename, i.xml_filename, i.status, i.phase,
             i.docs_total, i.docs_done, i.pages_done, i.doc_count, i.page_count,
-            i.error, i.source_kind, i.imported_at, u.display_name AS imported_by_name
+            i.error, i.source_kind, i.imported_at, i.enqueued_at, i.attempts,
+            u.display_name AS imported_by_name
        FROM loadfile_imports i LEFT JOIN users u ON u.id = i.imported_by
       WHERE i.id=$1 AND i.case_id=$2`,
     [importId, caseId]
@@ -504,53 +339,6 @@ router.get('/:caseId/imports/:importId', requireAuth, requireCaseRole('case_mana
 // runImport/runEdrmImport path the upload handler uses, and is duplicate-safe
 // (upsert on (case_id, control_number)).
 
-const RESET_MESSAGE =
-  'Reset: processing was interrupted by a service restart and the source chunk is no longer staged — please re-upload this chunk to complete it.';
-
-/**
- * Locate the staged _incoming_* source directory for an import, if it is still on
- * disk. Matches by the original uploaded file name(s) recorded on the row (chunk
- * zips are uniquely named per chunk), falling back to the sole incoming dir when
- * there is exactly one and it carries the expected .DAT/.XML loadfile. Returns the
- * absolute stage dir path, or null when the source is gone.
- */
-function findStagedSource(caseId: number, imp: any): string | null {
-  const caseDir = path.join(IMPORTS_ROOT, String(caseId));
-  if (!fs.existsSync(caseDir)) return null;
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(caseDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && e.name.startsWith('_incoming_'))
-      .map((e) => path.join(caseDir, e.name));
-  } catch { return null; }
-  if (dirs.length === 0) return null;
-
-  const wantNames: string[] = Array.isArray(imp.original_files)
-    ? imp.original_files.map((f: any) => (f && f.name ? path.basename(String(f.name)) : '')).filter(Boolean)
-    : [];
-  const loadfile = imp.dat_filename || imp.xml_filename || null;
-
-  // 1. Strong match: a dir whose top level contains one of the original uploaded files.
-  if (wantNames.length) {
-    for (const dir of dirs) {
-      let top: string[];
-      try { top = fs.readdirSync(dir); } catch { continue; }
-      if (wantNames.some((n) => top.includes(n))) return dir;
-    }
-  }
-
-  // 2. Fallback: exactly one incoming dir that actually carries the loadfile.
-  if (dirs.length === 1 && loadfile) {
-    const dir = dirs[0];
-    const extracted = path.join(dir, '_extracted');
-    const hasLoadfile =
-      (fs.existsSync(path.join(extracted, loadfile))) ||
-      (fs.existsSync(dir) && fs.readdirSync(dir).includes(loadfile)) ||
-      (fs.existsSync(extracted) && walk(extracted).some((p) => path.basename(p) === loadfile));
-    if (hasLoadfile) return dir;
-  }
-  return null;
-}
 
 // ---- POST /api/cases/:caseId/imports/:importId/reset ------------------------
 // Mark an orphaned processing/failed row as failed (keeps the row for audit).
@@ -563,8 +351,8 @@ router.post('/:caseId/imports/:importId/reset', requireAuth, requireCaseRole('ca
   );
   if (!rows.length) return res.status(404).json({ error: 'Import not found' });
   const imp = rows[0];
-  if (!['processing', 'failed'].includes(imp.status)) {
-    return res.status(409).json({ error: `Only imports that are still processing or already failed can be reset (this one is "${imp.status}").` });
+  if (!['queued', 'processing', 'failed'].includes(imp.status)) {
+    return res.status(409).json({ error: `Only imports that are queued, still processing or already failed can be reset (this one is "${imp.status}").` });
   }
   await query(
     `UPDATE loadfile_imports SET status='failed', phase='failed', error=$2 WHERE id=$1`,
@@ -578,7 +366,10 @@ router.post('/:caseId/imports/:importId/reset', requireAuth, requireCaseRole('ca
 });
 
 // ---- POST /api/cases/:caseId/imports/:importId/retry ------------------------
-// Re-run an existing import from its staged source on disk, if still present.
+// Re-enqueue an existing import onto the durable worker queue. The worker
+// resolves the staged source and re-runs the idempotent ingest (duplicate-safe),
+// so a retried part goes through the exact same restart-survivable path as a
+// fresh upload. Adds no new processing capability.
 router.post('/:caseId/imports/:importId/retry', requireAuth, requireCaseRole('case_manager'), async (req: AuthedRequest, res) => {
   const caseId = parseInt(req.params.caseId, 10);
   const importId = parseInt(req.params.importId, 10);
@@ -593,78 +384,25 @@ router.post('/:caseId/imports/:importId/retry', requireAuth, requireCaseRole('ca
     return res.status(409).json({ error: `Only imports that are still processing or already failed can be retried (this one is "${imp.status}").` });
   }
 
-  const stageDir = findStagedSource(caseId, imp);
-  if (!stageDir) {
+  // Fast-fail with clear feedback when the staged source for an uploaded chunk is
+  // gone. Network/folder ('path') imports re-resolve from their recorded source
+  // location, so leave those to the worker.
+  if (imp.source_kind !== 'path' && !findStagedSource(caseId, imp)) {
     return res.status(409).json({
       error: 'The source for this import is no longer staged on the server. Please re-upload this chunk to complete it.',
     });
   }
 
-  // Ensure the archive is extracted (re-extract if only the zip remains).
-  const extractedDir = path.join(stageDir, '_extracted');
-  try {
-    if (!fs.existsSync(extractedDir)) {
-      const zips = fs.readdirSync(stageDir).filter((f) => f.toLowerCase().endsWith('.zip'));
-      if (zips.length) {
-        fs.mkdirSync(extractedDir, { recursive: true });
-        for (const z of zips) {
-          execFileSync('unzip', ['-o', '-qq', path.join(stageDir, z), '-d', extractedDir], { stdio: 'ignore' });
-        }
-      }
-    }
-  } catch {
-    return res.status(409).json({ error: 'The staged source archive for this import could not be read. Please re-upload this chunk.' });
-  }
-
-  // Gather candidate files from the extracted tree (avoid walking the bulky
-  // flattened _images dir). Fall back to the stage dir root if no _extracted.
-  const scanRoot = fs.existsSync(extractedDir) ? extractedDir : stageDir;
-  const allFiles = walk(scanRoot).filter((p) => !p.toLowerCase().endsWith('.zip'));
-
-  const setName = imp.name || 'Re-run import';
-
-  // EDRM XML path (mirror the upload handler).
-  const edrmXmlPath = detectEdrmXml(allFiles);
-  if (edrmXmlPath) {
-    const sourceRoot = path.dirname(edrmXmlPath);
-    await query(`UPDATE loadfile_imports SET status='pending', phase='parsing', error=NULL WHERE id=$1`, [importId]);
-    await audit({
-      userId: req.user!.id, caseId, action: 'import.retry',
-      target: `import:${importId}`, detail: `${setName} — re-run from staged source — EDRM XML=${path.basename(edrmXmlPath)}`,
-    });
-    startEdrmJob({ importId, caseId, xmlPath: edrmXmlPath, sourceRoot, importedBy: imp.imported_by ?? req.user!.id, setName });
-    return res.status(202).json({ importId, status: 'pending', format: 'edrm', retried: true });
-  }
-
-  // Concordance DAT/OPT path.
-  const datFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.dat');
-  const optFiles = allFiles.filter((p) => path.extname(p).toLowerCase() === '.opt');
-  if (datFiles.length === 0) {
-    return res.status(409).json({ error: 'No .DAT loadfile was found in the staged source for this import. Please re-upload this chunk.' });
-  }
-  const datPath = datFiles[0];
-  const optPath = optFiles.length ? optFiles[0] : undefined;
-
-  // Reuse the already-flattened _images dir if present; otherwise flatten now.
-  const imagesDir = path.join(stageDir, '_images');
-  if (!fs.existsSync(imagesDir) || fs.readdirSync(imagesDir).length === 0) {
-    flattenImages(allFiles, imagesDir);
-  }
-
-  const ocr = config.enableOcr;
-  await query(`UPDATE loadfile_imports SET status='pending', phase='parsing', error=NULL WHERE id=$1`, [importId]);
+  await query(
+    `UPDATE loadfile_imports SET status='queued', phase='parsing', enqueued_at=now(), error=NULL WHERE id=$1`,
+    [importId]
+  );
   await audit({
     userId: req.user!.id, caseId, action: 'import.retry',
-    target: `import:${importId}`, detail: `${setName} — re-run from staged source — DAT=${path.basename(datPath)}${optPath ? ', OPT=' + path.basename(optPath) : ', no OPT'}`,
+    target: `import:${importId}`, detail: `${imp.name || 'Import'} — re-enqueued onto the durable import queue`,
   });
 
-  // Kick the SAME background ingest job used by the upload route (reuses the row).
-  startIngestJob({
-    importId, caseId, datPath, optPath, imagesDir,
-    importedBy: imp.imported_by ?? req.user!.id, setName, ocr,
-  });
-
-  res.status(202).json({ importId, status: 'pending', retried: true, datFile: path.basename(datPath), optFile: optPath ? path.basename(optPath) : null });
+  res.status(202).json({ importId, status: 'queued', retried: true });
 });
 
 // ---- GET /api/cases/:caseId/imports — history list --------------------------
@@ -672,8 +410,14 @@ router.get('/:caseId/imports', requireAuth, requireCaseRole('case_manager'), asy
   const caseId = parseInt(req.params.caseId, 10);
   const { rows } = await query(
     `SELECT i.id, i.name, i.dat_filename, i.opt_filename, i.xml_filename, i.status, i.phase,
-            i.doc_count, i.page_count, i.error, i.source_kind, i.imported_at,
-            u.display_name AS imported_by_name
+            i.doc_count, i.page_count, i.docs_total, i.docs_done, i.pages_done,
+            i.error, i.source_kind, i.imported_at, i.enqueued_at, i.attempts,
+            u.display_name AS imported_by_name,
+            CASE WHEN i.status='queued'
+                 THEN row_number() OVER (
+                        PARTITION BY (i.status='queued')
+                        ORDER BY i.enqueued_at ASC NULLS FIRST, i.id ASC)
+                 END AS queue_position
        FROM loadfile_imports i LEFT JOIN users u ON u.id = i.imported_by
       WHERE i.case_id=$1
       ORDER BY i.imported_at DESC`,

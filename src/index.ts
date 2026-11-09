@@ -16,6 +16,7 @@ import tokenRoutes from './routes/tokens';
 import v1Routes from './routes/v1';
 import licenceRoutes from './routes/licenses';
 import { refreshLicenceCache } from './lib/license';
+import { startImportWorker } from './lib/importQueue';
 
 const app = express();
 app.set('trust proxy', true);
@@ -107,6 +108,9 @@ const server = app.listen(config.port, '127.0.0.1', () => {
   // Warm the licence cache at startup so the first request is not slowed and the
   // enforcement gate has state immediately.
   refreshLicenceCache().catch((e) => console.error('licence cache warm failed', e));
+  // Start the durable, serialised background import worker. It resumes any
+  // import orphaned by a previous restart and processes the queue one at a time.
+  startImportWorker();
 });
 // Large ESI deliveries (multi-GB) can take a long time to stream in. Disable
 // Node's per-request timeout so a slow/large upload is not aborted by the app
