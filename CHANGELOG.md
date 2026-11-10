@@ -5,6 +5,17 @@ Meridian Edge is a **view-only** ESI review platform; these releases change
 packaging, limits and tooling only — they add no ESI processing/forensic
 capability.
 
+## v1.3.1 — 2026-11-10
+
+Installer robustness (no application changes; view-only guarantee unchanged).
+
+- install.sh, migrate.sh, run-local.sh and uninstall.sh now prepend the standard
+  sbin directories (/usr/sbin, /sbin) to PATH at startup. On minimal Debian hosts
+  — and under sudo's secure_path — these are frequently omitted, which made
+  useradd, nginx and systemctl report "command not found" even when installed.
+  The installer no longer depends on the caller's PATH.
+- No changes to the application, database schema, or migrations (001–010 as in v1.3.0).
+
 ## 1.3.0
 
 ### Added

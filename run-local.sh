@@ -31,6 +31,11 @@
 #
 set -euo pipefail
 
+# Ensure sbin dirs are on PATH. Minimal Debian installs (and sudo's secure_path)
+# often omit these, which makes useradd, nginx and systemctl appear 'not found'
+# even though they are installed. Prepend them so the installer is robust.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$SELF_DIR/app"
 
