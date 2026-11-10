@@ -5,6 +5,21 @@ Meridian Edge is a **view-only** ESI review platform; these releases change
 packaging, limits and tooling only — they add no ESI processing/forensic
 capability.
 
+## v1.3.2 — 2026-11-10
+
+Fix blank/white page on plain-HTTP (non-TLS) deployments (view-only guarantee unchanged).
+
+- The security middleware (helmet) was emitting a Content-Security-Policy
+  "upgrade-insecure-requests" directive by default, which forced browsers to
+  request all assets over HTTPS. On a plain-HTTP on-prem/LAN box this made every
+  asset fail (requested over https on a port nothing listens on), rendering a
+  blank white page even though the server was healthy. The directive is now
+  emitted only when FORCE_HTTPS=true, so the app works out-of-the-box over HTTP.
+- New optional .env setting FORCE_HTTPS (default false). Set it to true only when
+  the site is served over TLS; it re-enables the HTTPS upgrade directive.
+- No changes to the application features, database schema, or migrations (001–010
+  as in v1.3.0/v1.3.1).
+
 ## v1.3.1 — 2026-11-10
 
 Installer robustness (no application changes; view-only guarantee unchanged).
