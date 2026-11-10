@@ -5,6 +5,44 @@ Meridian Edge is a **view-only** ESI review platform; these releases change
 packaging, limits and tooling only — they add no ESI processing/forensic
 capability.
 
+## 1.3.0
+
+### Added
+- **Durable, serialised, restart-safe import queue** (migration `010_import_queue.sql`).
+  Loadfile imports are now processed by a single background worker, strictly one
+  at a time, backed entirely by database state. A service restart no longer
+  orphans an in-flight import: the worker detects a stale heartbeat on boot and
+  automatically **resumes** the interrupted import from its staged source (ingest
+  is idempotent — documents and pages upsert on their deterministic keys, so no
+  duplication). The imports panel shows a live queue (processing item plus the
+  ordered list of queued parts). Rendering runs in a forked child process so the
+  API and heartbeats stay responsive during large conversions.
+- **Self-service import retry / reset.** Case managers can retry a failed or
+  interrupted import (re-enqueued through the same durable path when its source is
+  still staged) or reset an orphaned one, from the imports panel — no database
+  access required.
+- **Email conversation threading** (migration `009_email_threading.sql`). A
+  view-only Conversation panel groups messages into their thread, with a thread
+  badge in the document list. No message content is altered.
+
+### Changed
+- **Robust loadfile field mapping.** Document names, types, dates and subjects in
+  the file list, viewer, binder and file-type filter now resolve across common
+  loadfile field-name variants (e.g. `SUBJECT`/`File Name`/`FILENAME`,
+  `FILETYPE`/`DOCTYPE`/native type, `DATESENT`/`Date Sent`/`DATE`). Corpora that
+  use a different Concordance/EDRM field naming now display real names and
+  meaningful types (e.g. email subjects and an "Email" type) instead of raw
+  control numbers and blank/"Unknown" types. Import/upload endpoints now return
+  promptly (HTTP 202) and enqueue rather than rendering inline.
+
+### Notes
+- This package ships migrations **001–010**. Migrations are idempotent, so
+  `install.sh` / `migrate.sh` remain both the clean-install and the upgrade path
+  and never drop data.
+- Meridian Edge remains a **view-only** ESI review platform. These changes
+  sequence and make durable the import of pre-processed loadfiles and improve
+  display; they add no ESI processing, collection or forensic capability.
+
 ## 1.2.0
 
 ### Added
