@@ -53,7 +53,7 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
   const offset = parseInt(req.query.offset as string) || 0;
 
-  const where: string[] = ['d.case_id = $1'];
+  const where: string[] = ['d.case_id = $1', 'd.deleted_at IS NULL'];
   const params: any[] = [caseId];
   let rankSelect = '0 AS rank';
   const usePattern = mode === 'pattern' && !!q;

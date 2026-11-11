@@ -5,6 +5,8 @@ import { listCasesHandler, createCaseHandler } from './cases';
 import { uploadImportHandler, pathImportHandler, importStatusHandler, upload } from './imports';
 import { listDocumentsHandler } from './documents';
 import batchRoutes from './batches';
+import auditEntryRoutes from './auditEntries';
+import retentionRoutes, { jobsRouter } from './retention';
 import * as blobStore from '../lib/blobStore';
 
 // Versioned public REST API (token authenticated), mounted at /api/v1.
@@ -56,5 +58,14 @@ router.head('/blobs/:sha256', async (req: AuthedRequest, res) => {
 
 // ---- Item batch API (Phase 2): /api/v1/cases/:caseId/batches... -------------
 router.use('/cases', batchRoutes);
+
+// ---- Case audit entries (Phase 3, request 8): /api/v1/cases/:caseId/audit-entries
+router.use('/cases', auditEntryRoutes);
+
+// ---- Delete / archive / restore (Phase 3, request 10): /api/v1/cases/... -----
+router.use('/cases', retentionRoutes);
+
+// ---- Delete-job polling: GET /api/v1/jobs/:jobId -----------------------------
+router.use('/', jobsRouter);
 
 export default router;

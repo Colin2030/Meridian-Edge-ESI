@@ -12,14 +12,17 @@ const router = Router();
 export const listCasesHandler = async (req: AuthedRequest, res: any) => {
   const u = req.user!;
   const params: any[] = [];
-  let whereCase = '';
+  // Active lists exclude soft-deleted and (unless asked) archived cases.
+  const includeArchived = ['1', 'true', 'yes'].includes(String((req.query as any)?.includeArchived || '').toLowerCase());
+  const conds: string[] = ['c.deleted_at IS NULL'];
+  if (!includeArchived) conds.push("c.status <> 'archived'");
   if (!u.isSystemAdmin) {
-    params.push(u.id);
-    whereCase = `WHERE c.id IN (SELECT case_id FROM case_memberships WHERE user_id=$1)`;
+    conds.push(`c.id IN (SELECT case_id FROM case_memberships WHERE user_id=$1)`);
   }
+  const whereCase = 'WHERE ' + conds.join(' AND ');
   const { rows } = await query<any>(
     `SELECT c.id, c.name, c.case_number, c.description, c.status, c.created_at,
-            (SELECT count(*) FROM documents d WHERE d.case_id=c.id)::int AS doc_count,
+            (SELECT count(*) FROM documents d WHERE d.case_id=c.id AND d.deleted_at IS NULL)::int AS doc_count,
             (SELECT count(*) FROM review_states r WHERE r.case_id=c.id AND r.status NOT IN ('unreviewed'))::int AS reviewed_count,
             (SELECT count(*) FROM bookmarks b WHERE b.case_id=c.id AND b.user_id=$${u.isSystemAdmin ? 1 : 2})::int AS bookmark_count
      FROM cases c ${whereCase} ORDER BY c.created_at DESC`,
