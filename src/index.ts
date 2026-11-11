@@ -35,6 +35,15 @@ app.use(
         objectSrc: ["'self'", 'blob:'],
         workerSrc: ["'self'", 'blob:'],
         frameAncestors: ["'self'", 'https://*.abacus.ai'],
+        // helmet enables `upgrade-insecure-requests` by default, which forces the
+        // browser to rewrite every same-origin asset request to https://. On a
+        // plain-HTTP on-prem / LAN deployment (no TLS) that breaks the SPA — assets
+        // are requested over https on a port nothing listens on, giving a white page.
+        // Only emit it when the deployment is actually served over TLS: set
+        // FORCE_HTTPS=true in .env. Default (unset/false) keeps the app usable on HTTP.
+        ...(String(process.env.FORCE_HTTPS || '').toLowerCase() === 'true'
+          ? {}
+          : { upgradeInsecureRequests: null }),
       },
     },
     crossOriginEmbedderPolicy: false,
