@@ -4,6 +4,8 @@ import { requireApiToken } from '../middleware/apitoken';
 import { listCasesHandler, createCaseHandler } from './cases';
 import { uploadImportHandler, pathImportHandler, importStatusHandler, upload } from './imports';
 import { listDocumentsHandler } from './documents';
+import batchRoutes from './batches';
+import * as blobStore from '../lib/blobStore';
 
 // Versioned public REST API (token authenticated), mounted at /api/v1.
 // Every route runs requireApiToken FIRST so req.user is set exactly as the
@@ -42,5 +44,17 @@ router.get('/cases/:caseId/imports/:importId', requireCaseRole('case_manager'), 
 // read_only+ on the case. Reuses the browser document-list handler (q, filters,
 // pagination). Note the underlying handler reads req.params.caseId via caseId.
 router.get('/cases/:caseId/documents', requireCaseRole('read_only'), listDocumentsHandler);
+
+// ---- HEAD /api/v1/blobs/:sha256 — does the server already hold this blob? ----
+// Lets a client skip re-uploading identical natives. 200 if held, 404 if not.
+router.head('/blobs/:sha256', async (req: AuthedRequest, res) => {
+  try {
+    const held = await blobStore.has(String(req.params.sha256));
+    res.status(held ? 200 : 404).end();
+  } catch { res.status(404).end(); }
+});
+
+// ---- Item batch API (Phase 2): /api/v1/cases/:caseId/batches... -------------
+router.use('/cases', batchRoutes);
 
 export default router;

@@ -17,6 +17,7 @@ import v1Routes from './routes/v1';
 import licenceRoutes from './routes/licenses';
 import { refreshLicenceCache } from './lib/license';
 import { startImportWorker } from './lib/importQueue';
+import { reconcileBatchesOnBoot } from './lib/batchRunner';
 
 const app = express();
 app.set('trust proxy', true);
@@ -120,6 +121,8 @@ const server = app.listen(config.port, '127.0.0.1', () => {
   // Start the durable, serialised background import worker. It resumes any
   // import orphaned by a previous restart and processes the queue one at a time.
   startImportWorker();
+  // Resume any batch left mid-commit by a previous restart (durable finalise).
+  reconcileBatchesOnBoot().catch((e) => console.error('batch reconcile failed', e));
 });
 // Large ESI deliveries (multi-GB) can take a long time to stream in. Disable
 // Node's per-request timeout so a slow/large upload is not aborted by the app
