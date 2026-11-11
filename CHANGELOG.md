@@ -5,6 +5,79 @@ Meridian Edge is a **view-only** ESI review platform; these releases change
 packaging, limits and tooling only — they add no ESI processing/forensic
 capability.
 
+## v1.4.0 — 2026-11-11
+
+Remontoire delivery: direct item ingestion, verification, audit trail and
+lifecycle management. Meridian Edge remains a **view-only** ESI review platform;
+this release adds ingestion, verification and management of *already-processed*
+items — it adds no ESI processing, extraction, OCR or forensic capability.
+
+New database migrations `011`–`017` (idempotent; applied automatically by
+`install.sh`/`migrate.sh`, never dropping existing data). All eleven integration
+requests from the delivery partner are addressed:
+
+- **Item batch API, no load file** — `POST /api/v1/cases/:caseId/batches` opens a
+  batch; `.../items` streams up to a few hundred items per request as a JSON
+  manifest plus multipart file parts; `.../commit` closes it and indexing runs
+  asynchronously. Items are upserted on `controlNumber`, so a retried request
+  never duplicates. Several item requests may run in parallel (declared
+  concurrency returned by the server).
+- **Extracted-text indexing** — text supplied by part or inline string is indexed;
+  UTF-8 with or without a byte-order mark is accepted; `text_indexed` /
+  `text_missing` are reported per language. The load-file `TEXTPATH` resolution
+  defect is fixed.
+- **Natives with their declared type** — the native is stored as supplied and
+  offered for download; its type is taken from a declared field (`mimeType` /
+  `FILETYPE` / `MIMETYPE`) with content-detection fallback, never the image
+  format; the original file name is kept beside the storage (hash) name.
+- **PDF or TIFF review image per item** — one multi-page PDF per item with no
+  `.OPT` file needed; single-page TIFF with `.OPT` still accepted; an item may
+  carry a native (download) and an image (viewing) together.
+- **Translated versions** — any number of text versions per item, each tagged
+  with a BCP 47 language code, original/translation flag, source language and
+  method; every version is indexed; the viewer switches versions (original by
+  default). Load-file `TRANSLATEDTEXTPATH` / `TRANSLATEDFROM` accepted.
+- **Conversation threading** — `thread_id`, position and size populated from
+  `threadId`/`position`/`size` (batch) or `THREADID`/`THREADPOSITION`/`THREADSIZE`
+  (load file); thread subject accepted or derived; the viewer shows the thread in
+  order with a per-document count.
+- **Family relationships by parent ID** — `parentControlNumber` / `PARENTID`
+  builds families from explicit links; `BEGATTACH`/`ENDATTACH` still accepted;
+  items whose parent is absent are reported, not loaded as unrelated documents.
+- **Case audit entries with attached reports** — `POST /api/v1/cases/:caseId/
+  audit-entries` records an append-only entry carrying one or more report files
+  (PDF/HTML/JSON/CSV); the platform records the posting user and time and a
+  SHA-256 of each attachment; entries list and attachments download via the API
+  and show in the case history.
+- **Per-import verification counts** — the batch/import status returns
+  `items_received`/`items_created`/`items_updated`, `text_indexed`/`text_missing`,
+  `natives_stored`/`images_stored`/`pages`, `threads_populated`/`families_linked`,
+  `unmapped_columns` and per-item `failures` (control number + machine-readable
+  `code`).
+- **Delete and archive** — `DELETE` for a case, an import/batch, or a single
+  document, and `PATCH {"status":"archived"}` to hide a case; restricted to a
+  system administrator or the owning case manager; every delete is audited;
+  case-level audit entries survive document removal; a 7-day retention window
+  with a restore endpoint guards against mistakes; large deletes return
+  `202 Accepted` with a job to poll.
+- **Progress reporting** — `POST .../batches` accepts `expectedItems` /
+  `expectedFiles` / `expectedBytes`; the status returns each phase (`receiving`,
+  `storing`, `indexing_text`, `rendering`, `linking`, `finalising`) as
+  `done`/`total`/`state`; counts only go up; `updatedAt` is refreshed at least
+  every 30 seconds; the end state is explicit (`completed`,
+  `completed_with_failures` or `failed`). Server-sent events on
+  `GET .../batches/:batchId/events` carry the same fields.
+
+Also added: `HEAD /api/v1/blobs/:sha256` so a client can skip files the server
+already holds; a field-mapping option on import; content-addressed blob storage
+with SHA-256 verification at the door; a manual retention purge utility
+(`scripts/purge-expired.js`, operator-run, not scheduled).
+
+Documentation for integrating agents is shipped under `docs/`: an OpenAPI 3.1
+specification (`openapi.yaml`), a developer guide, a field-mapping reference, a
+reference package with expected results, and a per-version API changelog.
+
+
 ## v1.3.2 — 2026-11-10
 
 Fix blank/white page on plain-HTTP (non-TLS) deployments (view-only guarantee unchanged).

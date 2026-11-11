@@ -1,0 +1,904 @@
+openapi: 3.1.0
+info:
+  title: Meridian Edge v1 REST API
+  version: 1.4.0
+  description: >
+    Machine-readable specification of the Meridian Edge v1 REST API, covering the
+    "Remontoire delivery" feature set (v1.4.0). Meridian Edge is a view-only ESI
+    (electronically stored information) review platform: the API imports and views
+    ALREADY-PROCESSED items (extracted text, natives, review images supplied by the
+    integrating pipeline). It performs NO extraction, OCR or forensic processing.
+
+
+    All endpoints below are served under the base path `/api/v1` and require an API
+    token (see the `apiToken` security scheme) unless stated otherwise. Per-case
+    role-based access control is enforced after authentication.
+
+
+    UK English is used throughout. Dates are ISO 8601 in UTC; hashes are lowercase
+    hex SHA-256; language codes are BCP 47.
+servers:
+  - url: https://esireview.meridianedge.co.uk/api/v1
+    description: Hosted production
+  - url: http://localhost:4100/api/v1
+    description: Local / on-premises
+security:
+  - apiToken: []
+tags:
+  - name: Cases
+  - name: Batches
+  - name: Imports
+  - name: Documents
+  - name: Audit entries
+  - name: Delete and retention
+  - name: Blobs
+  - name: Jobs
+paths:
+  /me:
+    get:
+      tags: [Cases]
+      summary: Identity of the authenticated token holder
+      responses:
+        '200':
+          description: The user the token acts as.
+          content:
+            application/json:
+              schema: { type: object }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /cases:
+    get:
+      tags: [Cases]
+      summary: List cases visible to the token holder
+      parameters:
+        - { name: includeArchived, in: query, required: false, schema: { type: integer, enum: [0, 1] }, description: Include archived cases when 1. }
+      responses:
+        '200':
+          description: Cases.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Case' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Cases]
+      summary: Create a case
+      description: Requires the `can_create_cases` privilege (or system administrator).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                caseNumber: { type: string }
+                description: { type: string }
+      responses:
+        '201':
+          description: Created case.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /cases/{caseId}:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    patch:
+      tags: [Delete and retention]
+      summary: Archive or un-archive a case
+      description: >
+        Hides a case from active lists (archive) or returns it (un-archive). Removes
+        nothing. Allowed only for a system administrator or the case manager who
+        created the case.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [archived, open] }
+      responses:
+        '200':
+          description: New status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  status: { type: string, enum: [archived, open] }
+        '400':
+          description: "Unsupported status value (`code: invalid_status`) or bad caseId (`code: bad_request`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Delete and retention]
+      summary: Soft-delete a whole case
+      description: >
+        Soft-deletes the case, its documents, files and imports. A 7-day retention
+        window applies; restore with POST /cases/{caseId}/restore. Allowed only for a
+        system administrator or the case manager who created the case. For more than
+        1000 live documents the delete runs as a background job and returns 202.
+      responses:
+        '200':
+          description: Deleted synchronously.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteResult' }
+        '202':
+          description: Large delete accepted; poll the job.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobAccepted' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /cases/{caseId}/restore:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Delete and retention]
+      summary: Restore a soft-deleted case within its retention window
+      responses:
+        '200':
+          description: Restored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  caseId: { type: integer }
+                  restored: { type: boolean }
+                  documentsRestored: { type: integer }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/RetentionExpired' }
+
+  /cases/{caseId}/batches:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Batches]
+      summary: Open an item batch
+      description: >
+        Opens a batch for direct item delivery (no load file). Declare totals up front
+        via expectedItems/expectedFiles/expectedBytes so every progress count has a
+        denominator; the platform echoes them back. Returns the server's accepted
+        concurrency. Requires case_manager on the case.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expectedItems: { type: integer, nullable: true }
+                expectedFiles: { type: integer, nullable: true }
+                expectedBytes: { type: integer, format: int64, nullable: true }
+      responses:
+        '201':
+          description: Batch opened.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batchId: { type: string, format: uuid }
+                  concurrency: { type: integer, example: 4, description: Maximum parallel item requests the server accepts against one batch. }
+                  expected: { $ref: '#/components/schemas/Expected' }
+                  status: { type: string, enum: [open] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /cases/{caseId}/batches/{batchId}/items:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - $ref: '#/components/parameters/BatchId'
+    post:
+      tags: [Batches]
+      summary: Deliver a page of items (multipart)
+      description: >
+        Accepts up to a few hundred items per request as a JSON manifest plus their
+        files as multipart parts, referenced by part name. Items are upserted on
+        `controlNumber`, so a retried request never creates duplicates. Several item
+        requests may run in parallel against one open batch (up to `concurrency`).
+
+
+        The manifest is supplied either as a form field named `items` (or `manifest`)
+        containing a JSON array, OR as a file part named `items`/`manifest`. Every
+        file referenced by a `part` name must be present as a multipart file part with
+        that field name. Per-file limit 2 GiB; up to 5000 parts per request.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                items:
+                  type: string
+                  description: JSON array of item manifests (or a top-level object with an `items` array). May instead be sent as a file part of the same name.
+                '<partName>':
+                  type: string
+                  format: binary
+                  description: Any number of binary file parts, each addressed by a `part` value in the manifest (text/native/image).
+      responses:
+        '200':
+          description: >
+            Per-item results. Note: individual items may fail (see each item's
+            `errors`) while the request as a whole returns 200.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batchId: { type: string, format: uuid }
+                  received: { type: integer, description: Number of item results in this response. }
+                  concurrency: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ItemResult' }
+        '400':
+          description: "The manifest is not valid JSON (`code: invalid_manifest`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: "Batch not found (`code: batch_not_found`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: "Batch is not open (`code: batch_not_open`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /cases/{caseId}/batches/{batchId}/commit:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - $ref: '#/components/parameters/BatchId'
+    post:
+      tags: [Batches]
+      summary: Close the batch and finalise asynchronously
+      description: >
+        Marks the batch `committing` and runs finalisation (rendering supplied review
+        images into page images, linking families, marking items visible)
+        asynchronously. Poll the status endpoint or subscribe to the events stream.
+      responses:
+        '202':
+          description: Finalisation started.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batchId: { type: string, format: uuid }
+                  status: { type: string, enum: [committing] }
+                  message: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: "Batch not found (`code: batch_not_found`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: "Batch is not open (`code: batch_not_open`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /cases/{caseId}/batches/{batchId}:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - $ref: '#/components/parameters/BatchId'
+    get:
+      tags: [Batches]
+      summary: Batch status (phases + verification + end state)
+      description: Requires read_only on the case.
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchStatus' }
+        '404':
+          description: "Batch not found (`code: batch_not_found`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /cases/{caseId}/batches/{batchId}/events:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - $ref: '#/components/parameters/BatchId'
+    get:
+      tags: [Batches]
+      summary: Server-sent events stream of batch status
+      description: >
+        A `text/event-stream` that emits a `status` event (payload identical to the
+        status endpoint) roughly every 1.5s, then an `end` event when the batch
+        reaches a terminal status. Requires read_only on the case.
+      responses:
+        '200':
+          description: SSE stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404':
+          description: "Batch not found (`code: batch_not_found`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /cases/{caseId}/batches/{batchId}/_delete:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - $ref: '#/components/parameters/BatchId'
+    delete:
+      tags: [Delete and retention]
+      summary: Soft-delete every document created by a batch
+      description: >
+        (Actual path is DELETE /cases/{caseId}/batches/{batchId}; shown with a
+        distinct key here only because OpenAPI disallows two operations on one path.)
+        Leaves the case in place. 7-day retention. Large deletes return 202 with a job.
+      responses:
+        '200':
+          description: Deleted synchronously.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteResult' }
+        '202':
+          description: Large delete accepted; poll the job.
+          content: { application/json: { schema: { $ref: '#/components/schemas/JobAccepted' } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /cases/{caseId}/imports:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Imports]
+      summary: Upload a Concordance DAT/OPT or EDRM XML load-file package (multipart)
+      description: >
+        Existing load-file import path. The package is enqueued and processed by the
+        durable background import worker one at a time. Requires case_manager.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                '<file>': { type: string, format: binary }
+                fieldMapping:
+                  type: string
+                  description: Optional JSON object binding integrator column names to platform fields, e.g. {"DATESENT":"date","THREADID":"thread_id"}.
+      responses:
+        '202':
+          description: Import enqueued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  importId: { type: integer }
+                  status: { type: string, enum: [queued] }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /cases/{caseId}/imports/path:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Imports]
+      summary: Enqueue an import from a server-side folder path
+      description: Reads a load-file package from a path under an allowed root. Requires case_manager.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string }
+                fieldMapping: { type: object, additionalProperties: { type: string } }
+      responses:
+        '202':
+          description: Import enqueued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  importId: { type: integer }
+                  status: { type: string, enum: [queued] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /cases/{caseId}/imports/{importId}:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - { name: importId, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Imports]
+      summary: Import status and per-import verification counts
+      description: Requires case_manager.
+      responses:
+        '200':
+          description: Import status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportStatus' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Delete and retention]
+      summary: Soft-delete every document created by an import
+      description: Leaves the case in place. 7-day retention. Large deletes return 202 with a job. Admin or owning case manager only.
+      responses:
+        '200':
+          description: Deleted synchronously.
+          content: { application/json: { schema: { $ref: '#/components/schemas/DeleteResult' } } }
+        '202':
+          description: Large delete accepted; poll the job.
+          content: { application/json: { schema: { $ref: '#/components/schemas/JobAccepted' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /cases/{caseId}/imports/{importId}/restore:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - { name: importId, in: path, required: true, schema: { type: integer } }
+    post:
+      tags: [Delete and retention]
+      summary: Restore an import's soft-deleted documents
+      responses:
+        '200':
+          description: Restored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  caseId: { type: integer }
+                  importId: { type: integer }
+                  restored: { type: boolean }
+                  documentsRestored: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /cases/{caseId}/documents:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    get:
+      tags: [Documents]
+      summary: List documents in a case
+      description: Requires read_only on the case.
+      responses:
+        '200':
+          description: Documents.
+          content:
+            application/json:
+              schema: { type: object }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /cases/{caseId}/documents/{controlNumber}:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - { name: controlNumber, in: path, required: true, schema: { type: string }, description: URL-encoded control number. }
+    delete:
+      tags: [Delete and retention]
+      summary: Soft-delete a single document and its files
+      description: 7-day retention. Admin or owning case manager only.
+      responses:
+        '200':
+          description: Deleted.
+          content: { application/json: { schema: { $ref: '#/components/schemas/DeleteResult' } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /cases/{caseId}/documents/{controlNumber}/restore:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - { name: controlNumber, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Delete and retention]
+      summary: Restore a single soft-deleted document
+      responses:
+        '200':
+          description: Restored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  caseId: { type: integer }
+                  controlNumber: { type: string }
+                  restored: { type: boolean }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: "Document is not deleted (`code: nothing_to_restore`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '410': { $ref: '#/components/responses/RetentionExpired' }
+
+  /cases/{caseId}/audit-entries:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Audit entries]
+      summary: Append a case audit entry with attached report files (multipart)
+      description: >
+        Append-only. Posts an entry (e.g. at the end of a pipeline stage) carrying one
+        or more report files (PDF, HTML, JSON or CSV). The platform records the posting
+        user and server time, stores each attachment content-addressed, computes its
+        SHA-256 and returns it. Entries can never be edited or deleted; a correction is
+        a new entry. Requires case_manager.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                body:
+                  type: string
+                  description: JSON body (may also be sent as `manifest`/`metadata`/`json`, or as individual form fields).
+                '<file>':
+                  type: string
+                  format: binary
+                  description: One or more report file parts (PDF/HTML/JSON/CSV; up to 50 files, 512 MiB each).
+      responses:
+        '201':
+          description: Entry created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditEntry' }
+        '400':
+          description: >
+            Invalid JSON body (`code: bad_request`, item `body`), missing eventType
+            (`code: bad_request`, item `eventType`), or an attachment of a disallowed
+            type (`code: unsupported_attachment_type`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    get:
+      tags: [Audit entries]
+      summary: List case audit entries (newest first)
+      description: Requires read_only on the case.
+      responses:
+        '200':
+          description: Entries.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AuditEntry' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /cases/{caseId}/audit-entries/{entryId}/attachments/{attachmentId}:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - { name: entryId, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: attachmentId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Audit entries]
+      summary: Download an audit-entry attachment
+      description: Requires read_only on the case.
+      responses:
+        '200':
+          description: The attachment bytes with its stored MIME type.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404':
+          description: "Attachment not found or its content is unavailable (`code: not_found`)."
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /blobs/{sha256}:
+    parameters:
+      - { name: sha256, in: path, required: true, schema: { type: string, pattern: '^[a-fA-F0-9]{64}$' } }
+    head:
+      tags: [Blobs]
+      summary: Does the server already hold this content?
+      description: >
+        Pre-check so a client can skip re-uploading identical natives/images. 200 if the
+        content is held, 404 if not. No body is returned.
+      responses:
+        '200': { description: The blob is held. }
+        '404': { description: The blob is not held. }
+
+  /jobs/{jobId}:
+    parameters:
+      - { name: jobId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Jobs]
+      summary: Poll a background delete job
+      responses:
+        '200':
+          description: Job state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    apiToken:
+      type: http
+      scheme: bearer
+      description: >
+        An API token created in the platform (Admin -> API tokens). Sent as
+        `Authorization: Bearer <token>`. The request then acts as the token's owner,
+        and per-case RBAC applies.
+  parameters:
+    CaseId:
+      name: caseId
+      in: path
+      required: true
+      schema: { type: integer }
+    BatchId:
+      name: batchId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    Unauthorized:
+      description: Missing or invalid API token.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: "Authenticated but not permitted (`code: forbidden`)."
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: "Resource not found (`code: not_found`)."
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    BadRequest:
+      description: "Invalid request (`code: bad_request`)."
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RetentionExpired:
+      description: "The retention window has expired; the record can no longer be restored (`code: retention_expired`)."
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    Error:
+      type: object
+      description: Standard error envelope. `code` is machine-readable and stable.
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: >
+            Stable machine-readable code. Batch item codes: missing_control_number,
+            missing_part, hash_mismatch, text_missing, parent_not_found,
+            unsupported_image_format, invalid_manifest, batch_not_open, item_error,
+            finalise_error, batch_not_found. Retention/lifecycle codes: not_found,
+            forbidden, invalid_status, retention_expired, unsupported_attachment_type,
+            nothing_to_restore, bad_request.
+          enum:
+            - missing_control_number
+            - missing_part
+            - hash_mismatch
+            - text_missing
+            - parent_not_found
+            - unsupported_image_format
+            - invalid_manifest
+            - batch_not_open
+            - item_error
+            - finalise_error
+            - batch_not_found
+            - not_found
+            - forbidden
+            - invalid_status
+            - retention_expired
+            - unsupported_attachment_type
+            - nothing_to_restore
+            - bad_request
+        error: { type: string, description: Human-readable message. }
+        item: { type: string, description: The control number, file or resource the error concerns, when applicable. }
+    Case:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        case_number: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        status: { type: string, enum: [open, archived] }
+        created_at: { type: string, format: date-time }
+    Expected:
+      type: object
+      properties:
+        items: { type: integer, nullable: true }
+        files: { type: integer, nullable: true }
+        bytes: { type: integer, format: int64, nullable: true }
+    ItemManifest:
+      type: object
+      description: One item in the `items` manifest array.
+      required: [controlNumber]
+      properties:
+        controlNumber: { type: string, description: Stable unique key for the item; upsert key. }
+        parentControlNumber: { type: string, nullable: true, description: Control number of the parent item (families, request 7). }
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Arbitrary metadata fields, preserved verbatim and indexed.
+        processedBy: { type: string, nullable: true, description: Engine and version that produced the item. }
+        messageId: { type: string, nullable: true }
+        inReplyTo: { type: string, nullable: true }
+        text:
+          type: array
+          items: { $ref: '#/components/schemas/TextVersion' }
+        native: { $ref: '#/components/schemas/NativeRef' }
+        image: { $ref: '#/components/schemas/ImageRef' }
+        thread: { $ref: '#/components/schemas/ThreadRef' }
+    TextVersion:
+      type: object
+      description: A text version. Provide the text via `part` (multipart file), or inline via `inline`/`content`/`text`.
+      properties:
+        part: { type: string, description: Name of the multipart file part carrying this text (UTF-8, BOM tolerated). }
+        inline: { type: string, description: Inline text (alternative to `part`). }
+        content: { type: string, description: Alias for inline. }
+        text: { type: string, description: Alias for inline. }
+        language: { type: string, description: 'BCP 47 language code, lower-cased (e.g. en, fr, zh-hans). Default: und.' }
+        kind: { type: string, enum: [extracted, translation, ocr], default: extracted, description: The first `extracted` version becomes the original. }
+        translatedFrom: { type: string, nullable: true, description: Source language code for a translation. }
+        method: { type: string, enum: [machine, human], nullable: true }
+    NativeRef:
+      type: object
+      properties:
+        part: { type: string, description: Name of the multipart file part carrying the native. }
+        fileName: { type: string, description: Original file name (kept as metadata; not used as storage name). }
+        mimeType: { type: string, description: Declared MIME type; used as a hint, confirmed against content, never defaulted to the image format. }
+        sha256: { type: string, description: Optional expected SHA-256; the upload is rejected with hash_mismatch if the content differs. }
+    ImageRef:
+      type: object
+      properties:
+        part: { type: string, description: Name of the multipart file part carrying the review image. }
+        format: { type: string, enum: [pdf, tiff], description: Any other value yields unsupported_image_format. }
+        pageCount: { type: integer, nullable: true, description: Declared page count (the platform renders and counts actual pages on commit). }
+        sha256: { type: string, description: Optional expected SHA-256. }
+    ThreadRef:
+      type: object
+      properties:
+        threadId: { type: string, description: Groups messages into a conversation. }
+        position: { type: integer, description: 1-based position of this message within the thread. }
+        size: { type: integer, description: Total messages in the thread. }
+        subject: { type: string, description: Thread subject (or derived from the first message). }
+    ItemResult:
+      type: object
+      properties:
+        controlNumber: { type: string, nullable: true }
+        status: { type: string, enum: [created, updated, failed] }
+        documentId: { type: integer }
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              part: { type: string }
+              sha256: { type: string }
+              deduplicated: { type: boolean }
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/Failure' }
+    Failure:
+      type: object
+      properties:
+        controlNumber: { type: string, nullable: true }
+        code: { type: string }
+        reason: { type: string }
+        failedValue: { type: string, nullable: true }
+    PhaseCount:
+      type: object
+      properties:
+        phase: { type: string, enum: [receiving, storing, indexing_text, rendering, linking, finalising] }
+        done: { type: integer, description: Monotonic; never decreases. }
+        total: { type: integer }
+        state: { type: string, enum: [pending, running, complete] }
+    Verification:
+      type: object
+      description: Per-batch/per-import reconciliation counts (request 9).
+      properties:
+        items_received: { type: integer }
+        items_created: { type: integer }
+        items_updated: { type: integer }
+        text_indexed:
+          type: object
+          additionalProperties: { type: integer }
+          description: Count of indexed text versions per BCP 47 language.
+        text_missing: { type: integer }
+        natives_stored: { type: integer }
+        images_stored: { type: integer }
+        pages: { type: integer }
+        threads_populated: { type: integer }
+        families_linked: { type: integer }
+        unmapped_columns:
+          type: array
+          items: { type: string }
+          description: Columns preserved as metadata only. Always [] for batch items (structured JSON has no stray columns); populated for load-file imports.
+        failures:
+          type: array
+          items: { $ref: '#/components/schemas/Failure' }
+    BatchStatus:
+      type: object
+      properties:
+        batchId: { type: string, format: uuid }
+        caseId: { type: integer }
+        status: { type: string, enum: [open, committing, completed, completed_with_failures, failed] }
+        expected: { $ref: '#/components/schemas/Expected' }
+        concurrency: { type: integer }
+        phases:
+          type: array
+          items: { $ref: '#/components/schemas/PhaseCount' }
+        verification: { $ref: '#/components/schemas/Verification' }
+        endState:
+          type: string
+          nullable: true
+          enum: [completed, completed_with_failures, failed, null]
+        updatedAt: { type: string, format: date-time, description: Refreshed at least every 30s while work continues. }
+    ImportStatus:
+      type: object
+      properties:
+        id: { type: integer }
+        status: { type: string, enum: [queued, processing, completed, failed] }
+        phase: { type: string, enum: [parsing, rendering, completed, failed] }
+        docs_total: { type: integer }
+        docs_done: { type: integer }
+        pages_done: { type: integer }
+        verification: { $ref: '#/components/schemas/Verification' }
+        error: { type: string, nullable: true }
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        caseId: { type: integer }
+        eventType: { type: string, example: remontoire.pipeline.completed }
+        occurredAt: { type: string, format: date-time, nullable: true, description: When the stage finished (may differ from postedAt). }
+        summary: { type: string, nullable: true }
+        source:
+          type: object
+          properties:
+            system: { type: string, nullable: true }
+            version: { type: string, nullable: true }
+            runId: { type: string, nullable: true }
+        importId: { type: integer, nullable: true }
+        batchId: { type: string, format: uuid, nullable: true }
+        postedBy:
+          type: object
+          properties:
+            id: { type: integer }
+            username: { type: string }
+        postedAt: { type: string, format: date-time }
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              filename: { type: string }
+              mime: { type: string }
+              size: { type: integer }
+              sha256: { type: string }
+    DeleteResult:
+      type: object
+      properties:
+        caseId: { type: integer }
+        importId: { type: integer }
+        batchId: { type: string }
+        controlNumber: { type: string }
+        deleted: { type: boolean }
+        documentsDeleted: { type: integer }
+        retentionDays: { type: integer, example: 7 }
+    JobAccepted:
+      type: object
+      properties:
+        jobId: { type: string, format: uuid }
+        kind: { type: string, enum: [case, import, batch] }
+        status: { type: string, enum: [running] }
+        docsTotal: { type: integer }
+        pollUrl: { type: string, example: /api/v1/jobs/<jobId> }
+    Job:
+      type: object
+      properties:
+        jobId: { type: string, format: uuid }
+        caseId: { type: integer }
+        kind: { type: string, enum: [case, import, batch] }
+        target: { type: string }
+        status: { type: string, enum: [running, completed, failed] }
+        docsTotal: { type: integer }
+        docsDone: { type: integer }
+        error: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
