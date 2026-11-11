@@ -4,13 +4,20 @@ import { execFileSync } from 'child_process';
 import { config } from '../config';
 import { query, withTx } from '../db';
 import { parseDat, parseOpt, buildFieldMap, OptDocument, parseEdrmXml, EdrmFolderNode } from './loadfile';
-import { deriveThread } from './threading';
+import { deriveThread, deriveThreadId, normaliseSubject } from './threading';
+import { decodeText, resolveRefPath, buildBasenameIndex, isoDateUtc } from './normalise';
+import { resolveNativeMime } from './fileType';
+import * as blobStore from './blobStore';
 
 export interface ImportOptions {
   caseId: number;
   datPath: string;
   optPath?: string;
   imagesDir?: string;
+  /** Package root used to resolve TEXTPATH / NATIVEPATH / TRANSLATEDTEXTPATH refs. Defaults to dirname(datPath). */
+  sourceRoot?: string;
+  /** Integrator sourceColumn -> platformField bindings, e.g. {"DATESENT":"date","THREADID":"thread_id"}. */
+  fieldMapping?: Record<string, string> | null;
   importedBy?: number | null;
   setName?: string;
   ocr?: boolean;
@@ -115,13 +122,99 @@ function ocrImage(imgPath: string): string {
   return '';
 }
 
+/** Recursively collect every file under a directory (local helper; avoids a circular import of importRunner). */
+function walkFiles(dir: string): string[] {
+  const out: string[] = [];
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walkFiles(full));
+    else out.push(full);
+  }
+  return out;
+}
+
+/**
+ * Upsert one text version for a document into document_text, store/dedup large text
+ * in the blob store, and maintain the per-version search_tsv. Returns the text so
+ * the caller can fold every version into documents.search_tsv (cross-language
+ * search via the EXISTING case search path). One version per (document, language,
+ * kind) — a re-import overwrites in place.
+ */
+async function upsertDocumentText(
+  documentId: number,
+  version: {
+    language: string;
+    kind: 'extracted' | 'translation' | 'ocr';
+    isOriginal: boolean;
+    translatedFrom?: string | null;
+    method?: 'machine' | 'human' | null;
+    text: string;
+  }
+): Promise<string> {
+  const text = version.text || '';
+  const byteLength = Buffer.byteLength(text, 'utf8');
+  // Store the text in the blob store (deduplicated) when it is large; small text
+  // stays inline for cheap display. Either way the text is indexed below.
+  let blobSha: string | null = null;
+  if (byteLength >= 8192) {
+    try {
+      const r = await blobStore.put(Buffer.from(text, 'utf8'), { mimeType: 'text/plain' });
+      blobSha = r.sha256;
+    } catch { /* fall back to inline storage */ }
+  }
+  await query(
+    `INSERT INTO document_text
+       (document_id, language, kind, is_original, translated_from, method, blob_sha256, text_content, char_length, byte_length, search_tsv)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, to_tsvector('simple', coalesce($8,'')))
+     ON CONFLICT (document_id, language, kind) DO UPDATE SET
+       is_original=EXCLUDED.is_original, translated_from=EXCLUDED.translated_from, method=EXCLUDED.method,
+       blob_sha256=EXCLUDED.blob_sha256, text_content=EXCLUDED.text_content,
+       char_length=EXCLUDED.char_length, byte_length=EXCLUDED.byte_length, search_tsv=EXCLUDED.search_tsv`,
+    [documentId, (version.language || 'und').toLowerCase(), version.kind, version.isOriginal,
+     version.translatedFrom || null, version.method || null, blobSha, text || null, text.length, byteLength]
+  );
+  return text;
+}
+
+/** Read the first `n` bytes of a file (for content-based type detection) without loading it whole. */
+function readHead(filePath: string, n = 4100): Buffer | null {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(n);
+      const read = fs.readSync(fd, buf, 0, n, 0);
+      return buf.subarray(0, read);
+    } finally { fs.closeSync(fd); }
+  } catch { return null; }
+}
+
+/** Record a per-item import failure (code + control number + reason + the value that failed). */
+async function recordFailure(
+  caseId: number, importId: number,
+  f: { controlNumber?: string; code: string; reason: string; failedValue?: string }
+): Promise<void> {
+  await query(
+    `INSERT INTO import_failures (case_id, import_id, control_number, code, reason, failed_value)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [caseId, importId, f.controlNumber || null, f.code, f.reason, f.failedValue || null]
+  );
+}
+
 export async function runImport(opts: ImportOptions): Promise<ImportResult> {
   const log = opts.log || (() => {});
   const progress = opts.onProgress || (() => {});
   const datContent = fs.readFileSync(opts.datPath, 'utf8');
   const dat = parseDat(datContent);
-  const fieldMap = buildFieldMap(dat.fields);
-  log(`Parsed .DAT: ${dat.rows.length} records, delimiter=${dat.delimiterSet.kind}, control field=${fieldMap.control_number}`);
+  const fieldMap = buildFieldMap(dat.fields, opts.fieldMapping);
+  // Package root: resolve TEXTPATH / NATIVEPATH / TRANSLATEDTEXTPATH references
+  // against it. Build a basename index of every file under it so a reference still
+  // resolves across nested TEXT\ / NATIVE\ dirs and Windows path separators (the
+  // text files are NOT flattened into the images dir).
+  const sourceRoot = opts.sourceRoot || path.dirname(opts.datPath);
+  const basenameIndex = buildBasenameIndex(walkFiles(sourceRoot));
+  log(`Parsed .DAT: ${dat.rows.length} records, delimiter=${dat.delimiterSet.kind}, control field=${fieldMap.control_number}, source root=${sourceRoot}`);
   progress({ phase: 'parsing', docsDone: 0, docsTotal: dat.rows.length, pagesDone: 0 });
 
   let optDocs: OptDocument[] = [];
@@ -161,30 +254,81 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
   let docCount = 0;
   const overwritten: string[] = [];
 
+  // --- verification counters (request 9: account for every item) -------------
+  let itemsCreated = 0, itemsUpdated = 0;
+  let textIndexed = 0, textMissing = 0;
+  let nativesStored = 0, imagesStored = 0;
+  let threadsPopulated = 0, translationsCreated = 0;
+  let failureCount = 0;
+  const textByLanguage: Record<string, number> = {};
+  // Columns bound to a platform field are "mapped"; the rest are preserved as
+  // metadata only (unmapped_columns).
+  const mappedSourceCols = new Set(Object.values(fieldMap).filter(Boolean) as string[]);
+  const unmappedColumns = dat.fields.filter((f) => !mappedSourceCols.has(f));
+  // Family post-pass: explicit parent links to resolve once every item is loaded.
+  const parentRefs: { control: string; parent: string }[] = [];
+  const allControlKeys = new Set<string>();
+
+  const fail = async (f: { controlNumber?: string; code: string; reason: string; failedValue?: string }) => {
+    await recordFailure(opts.caseId, setId, f);
+    failureCount++;
+  };
+
   for (const row of dat.rows) {
     const control = (fieldMap.control_number ? row[fieldMap.control_number] : '') || `DOC-${docCount + 1}`;
     const controlKey = control.toUpperCase();
-    const textField = fieldMap.text_path ? row[fieldMap.text_path] : '';
+    allControlKeys.add(controlKey);
+
+    // --- Bug 1: TEXTPATH resolved relative to the package root, read UTF-8 ±BOM,
+    // line-endings normalised, and INDEXED. A reference to a missing file is
+    // counted as text_missing (never loaded as empty text that reads as "no text").
+    const textRef = fieldMap.text_path ? (row[fieldMap.text_path] || '').trim() : '';
     let extractedText = '';
     let hasText = false;
-    // If text field is actual text (not a path), use it directly.
-    if (textField && !/[\\/].*\.(txt|dat)$/i.test(textField) && textField.length > 20) {
-      extractedText = textField;
-      hasText = true;
+    // A value with no path separators and no text-file extension, longer than a
+    // short token, is treated as INLINE text (legacy behaviour); otherwise it is a
+    // path to resolve and read.
+    const looksInline = !!textRef && !/[\\/]/.test(textRef) && !/\.(txt|dat|text)$/i.test(textRef) && textRef.length > 40;
+    if (textRef && looksInline) {
+      extractedText = textRef;
+      hasText = extractedText.length > 0;
+    } else if (textRef) {
+      const resolved = resolveRefPath(sourceRoot, textRef, basenameIndex);
+      if (resolved) {
+        try {
+          extractedText = decodeText(fs.readFileSync(resolved)).trim();
+          hasText = extractedText.length > 0;
+        } catch (e: any) {
+          await fail({ controlNumber: control, code: 'text_read_error', reason: `Could not read text file: ${e?.message || e}`, failedValue: textRef });
+        }
+      } else {
+        textMissing++;
+        await fail({ controlNumber: control, code: 'text_missing', reason: `Text file referenced by TEXTPATH was not found in the package`, failedValue: textRef });
+        log(`! text missing for ${control}: ${textRef}`);
+      }
     }
 
-    // Determine pages from OPT
+    // --- original / translation languages --------------------------------------
+    const langField = fieldMap.language ? (row[fieldMap.language] || '').trim() : '';
+    const translatedRef = fieldMap.translated_text_path ? (row[fieldMap.translated_text_path] || '').trim() : '';
+    const translatedFromVal = fieldMap.translated_from ? (row[fieldMap.translated_from] || '').trim() : '';
+    const translatedToVal = fieldMap.translated_to ? (row[fieldMap.translated_to] || '').trim() : '';
+    // The original's language: the translation's source language when a translation
+    // is present, else a declared language column, else undetermined.
+    const originalLang = (translatedFromVal || langField || 'und').toLowerCase();
+
+    // Determine pages from OPT (rendered review image).
     const od = optByKey.get(controlKey);
     const docDir = path.join(renderedRoot, controlKey.replace(/[^A-Za-z0-9_-]/g, '_'));
     fs.mkdirSync(docDir, { recursive: true });
 
     const pageImagePaths: string[] = [];
-    let nativeType: 'tiff' | 'pdf' | 'none' = 'none';
+    let nativeType: 'tiff' | 'pdf' | 'none' | 'native' = 'none';
     let nativeRel: string | null = null;
+    let firstExt = '';
 
     if (od) {
       let pageIdx = 0;
-      let firstExt = '';
       for (const p of od.pages) {
         const resolved = resolveImagePath(p.fullPath, opts.imagesDir);
         if (!resolved) {
@@ -193,7 +337,7 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
         }
         const ext = path.extname(resolved).toLowerCase();
         if (!firstExt) firstExt = ext;
-        // Preserve native: copy original (esp. for PDFs)
+        // Preserve native: copy original (esp. for PDFs) for the legacy native_path.
         if (ext === '.pdf') {
           nativeType = 'pdf';
           const destNative = path.join(nativeRoot, `${controlKey.replace(/[^A-Za-z0-9_-]/g, '_')}.pdf`);
@@ -210,8 +354,48 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
         }
       }
     }
+    // The review image's format + page count (requests 1/4).
+    const imageFormat: 'pdf' | 'tiff' | null = pageImagePaths.length ? (firstExt === '.pdf' ? 'pdf' : 'tiff') : null;
+    const imagePageCount = pageImagePaths.length || null;
+    if (pageImagePaths.length) imagesStored++;
 
-    // OCR if enabled and no text yet
+    // --- Bug 2: native from NATIVEPATH stored content-addressed in the blob store.
+    // The MIME type comes from the declared FILETYPE/MIMETYPE column, else content
+    // detection — NEVER the image format. The original file name is kept separate
+    // from the storage (hash) name.
+    let nativeSha: string | null = null;
+    let nativeFilename: string | null = null;
+    let nativeStorageName: string | null = null;
+    let nativeMime: string | null = null;
+    const nativeRef = fieldMap.native_path ? (row[fieldMap.native_path] || '').trim() : '';
+    const declaredType = fieldMap.file_type ? (row[fieldMap.file_type] || '').trim() : '';
+    if (nativeRef) {
+      const resolvedNative = resolveRefPath(sourceRoot, nativeRef, basenameIndex);
+      if (resolvedNative) {
+        try {
+          nativeMime = resolveNativeMime(declaredType, path.basename(nativeRef.replace(/\\/g, '/')), readHead(resolvedNative));
+          const put = await blobStore.putFile(resolvedNative, { mimeType: nativeMime || undefined });
+          nativeSha = put.sha256;
+          nativeStorageName = put.sha256;
+          nativeFilename = path.basename(nativeRef.replace(/\\/g, '/'));
+          nativesStored++;
+          if (nativeType === 'none') nativeType = 'native';
+        } catch (e: any) {
+          await fail({ controlNumber: control, code: 'native_error', reason: `Could not store native: ${e?.message || e}`, failedValue: nativeRef });
+        }
+      } else {
+        nativeFilename = path.basename(nativeRef.replace(/\\/g, '/'));
+        nativeMime = declaredType ? resolveNativeMime(declaredType, nativeFilename, null) : null;
+        await fail({ controlNumber: control, code: 'native_missing', reason: `Native file referenced by NATIVEPATH was not found in the package`, failedValue: nativeRef });
+        log(`! native missing for ${control}: ${nativeRef}`);
+      }
+    } else if (declaredType) {
+      // No native file, but a declared type was supplied — record it.
+      nativeMime = resolveNativeMime(declaredType, fieldMap.filename ? row[fieldMap.filename] : undefined, null);
+    }
+
+    // OCR if enabled and no text yet (OCR is NOT ESI extraction — it reads text off
+    // a supplied review image for search only; gated behind config.enableOcr).
     if (opts.ocr && !hasText && pageImagePaths.length > 0) {
       const texts: string[] = [];
       for (const rel of pageImagePaths) {
@@ -221,35 +405,75 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
       hasText = extractedText.length > 0;
     }
 
-    // metadata = all fields, but keep the bulky extracted-text field out of the metadata panel
+    // metadata = all fields, but keep the bulky text/translation path fields out of
+    // the metadata panel. Normalise the date to ISO-8601 UTC, keeping the original.
     const metadata: Record<string, string> = { ...row };
     if (hasText && fieldMap.text_path && metadata[fieldMap.text_path] !== undefined) {
       delete metadata[fieldMap.text_path];
     }
+    if (fieldMap.date && row[fieldMap.date]) {
+      const d = isoDateUtc(row[fieldMap.date]);
+      if (d.iso) metadata['Date (ISO-8601 UTC)'] = d.iso; // original value stays under its own column
+    }
+    if (nativeFilename) metadata['Native File Name'] = nativeFilename;
+    if (nativeMime) metadata['Native Type'] = nativeMime;
 
-    // Email conversation threading (view-only): for email documents, group by the
-    // normalised subject so reviewers can follow a reply chain. An email is
-    // identified by having both a sender and a subject, or an .eml/.msg native.
+    // --- Bug 3: threading from THREADID / THREADPOSITION / THREADSIZE columns
+    // (+ thread subject, + optional MESSAGEID / INREPLYTO). Falls back to the
+    // subject-derived grouping when no explicit thread id is supplied.
     let threadId: string | null = null;
     let threadSubject: string | null = null;
+    let threadPosition: number | null = null;
+    let threadSize: number | null = null;
     const subjectVal = fieldMap.subject ? row[fieldMap.subject] : '';
     const fromVal = fieldMap.from ? row[fieldMap.from] : '';
     const filenameVal = fieldMap.filename ? row[fieldMap.filename] : '';
+    const explicitThreadId = fieldMap.thread_id ? (row[fieldMap.thread_id] || '').trim() : '';
+    const explicitThreadSubject = fieldMap.thread_subject ? (row[fieldMap.thread_subject] || '').trim() : '';
+    threadPosition = fieldMap.thread_position && row[fieldMap.thread_position] ? (parseInt(row[fieldMap.thread_position], 10) || null) : null;
+    threadSize = fieldMap.thread_size && row[fieldMap.thread_size] ? (parseInt(row[fieldMap.thread_size], 10) || null) : null;
+    const messageId = fieldMap.message_id ? (row[fieldMap.message_id] || '').trim() || null : null;
+    const inReplyTo = fieldMap.in_reply_to ? (row[fieldMap.in_reply_to] || '').trim() || null : null;
     const looksLikeEmail = !!(fromVal && subjectVal) || /\.(eml|msg)$/i.test(filenameVal || '') || /\.(eml|msg)$/i.test(control || '');
-    if (looksLikeEmail && subjectVal) {
+    if (explicitThreadId) {
+      // Supplied thread id wins. Namespace it to the case so ids never collide
+      // across cases, and keep it stable/deterministic for the same supplied id.
+      threadId = deriveThreadId(opts.caseId, `tid:${explicitThreadId}`);
+      threadSubject = explicitThreadSubject || (subjectVal ? normaliseSubject(subjectVal) : null);
+    } else if (looksLikeEmail && subjectVal) {
       const t = deriveThread(opts.caseId, subjectVal);
       if (t) { threadId = t.threadId; threadSubject = t.threadSubject; }
     }
+    if (threadId) threadsPopulated++;
+
+    // --- Family by explicit parent (request 7): PARENTID -> parent_control_number.
+    const parentControl = fieldMap.parent_control_number ? (row[fieldMap.parent_control_number] || '').trim() : '';
+    if (parentControl) parentRefs.push({ control, parent: parentControl });
+
+    // Provenance: which engine produced the item (if a column carries it).
+    const processedBy = (row['PROCESSEDBY'] || row['ProcessedBy'] || row['processedBy'] || '').trim() || null;
 
     const docRow = await query<{ id: number; was_overwrite: boolean }>(
-      `INSERT INTO documents (case_id, set_id, control_number, native_type, native_path, page_count, has_text, extracted_text, metadata, thread_id, thread_subject)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      `INSERT INTO documents (case_id, set_id, control_number, native_type, native_path, page_count,
+         has_text, extracted_text, metadata, thread_id, thread_subject, thread_position, thread_size,
+         message_id, in_reply_to, parent_control_number, native_filename, native_storage_name,
+         native_sha256, native_mime, image_format, image_page_count, processed_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
        ON CONFLICT (case_id, control_number) DO UPDATE SET set_id=EXCLUDED.set_id, native_type=EXCLUDED.native_type,
          native_path=EXCLUDED.native_path, page_count=EXCLUDED.page_count, has_text=EXCLUDED.has_text,
          extracted_text=EXCLUDED.extracted_text, metadata=EXCLUDED.metadata,
-         thread_id=EXCLUDED.thread_id, thread_subject=EXCLUDED.thread_subject
+         thread_id=EXCLUDED.thread_id, thread_subject=EXCLUDED.thread_subject,
+         thread_position=EXCLUDED.thread_position, thread_size=EXCLUDED.thread_size,
+         message_id=EXCLUDED.message_id, in_reply_to=EXCLUDED.in_reply_to,
+         parent_control_number=EXCLUDED.parent_control_number, native_filename=EXCLUDED.native_filename,
+         native_storage_name=EXCLUDED.native_storage_name, native_sha256=EXCLUDED.native_sha256,
+         native_mime=EXCLUDED.native_mime, image_format=EXCLUDED.image_format,
+         image_page_count=EXCLUDED.image_page_count, processed_by=EXCLUDED.processed_by
        RETURNING id, (xmax <> 0) AS was_overwrite`,
-      [opts.caseId, setId, control, nativeType, nativeRel, pageImagePaths.length, hasText, extractedText || null, JSON.stringify(metadata), threadId, threadSubject]
+      [opts.caseId, setId, control, nativeType, nativeRel, pageImagePaths.length,
+       hasText, extractedText || null, JSON.stringify(metadata), threadId, threadSubject, threadPosition, threadSize,
+       messageId, inReplyTo, parentControl || null, nativeFilename, nativeStorageName,
+       nativeSha, nativeMime, imageFormat, imagePageCount, processedBy]
     );
     const docId = docRow.rows[0].id;
     // xmax<>0 on the ON CONFLICT path => the row already existed and was updated
@@ -257,7 +481,10 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
     // within this one). Record + log it so chunked imports stay auditable.
     if (docRow.rows[0].was_overwrite) {
       overwritten.push(control);
+      itemsUpdated++;
       log(`! overwrote control number for ${control}: existing document in this case updated in place (chunk/import overlap)`);
+    } else {
+      itemsCreated++;
     }
 
     await query(`DELETE FROM document_pages WHERE document_id=$1`, [docId]);
@@ -269,14 +496,48 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
       );
     }
 
-    // update tsvector (metadata text + extracted text)
+    // --- text versions (document_text): the original/extracted text, plus one
+    // translation from the loadfile (TRANSLATEDTEXTPATH + TRANSLATEDFROM). Each is
+    // independently indexed; both are folded into documents.search_tsv below so the
+    // EXISTING case search finds a document by its translation too (cross-language).
+    let translationText = '';
+    if (hasText) {
+      await upsertDocumentText(docId, { language: originalLang, kind: 'extracted', isOriginal: true, text: extractedText });
+      textIndexed++;
+      textByLanguage[originalLang] = (textByLanguage[originalLang] || 0) + 1;
+    }
+    if (translatedRef) {
+      const resolvedTr = resolveRefPath(sourceRoot, translatedRef, basenameIndex);
+      if (resolvedTr) {
+        try {
+          translationText = decodeText(fs.readFileSync(resolvedTr)).trim();
+          if (translationText) {
+            const trLang = (translatedToVal || 'en').toLowerCase();
+            await upsertDocumentText(docId, {
+              language: trLang, kind: 'translation', isOriginal: false,
+              translatedFrom: originalLang, method: 'machine', text: translationText,
+            });
+            translationsCreated++;
+            textByLanguage[trLang] = (textByLanguage[trLang] || 0) + 1;
+          }
+        } catch (e: any) {
+          await fail({ controlNumber: control, code: 'translation_read_error', reason: `Could not read translation: ${e?.message || e}`, failedValue: translatedRef });
+        }
+      } else {
+        await fail({ controlNumber: control, code: 'translation_missing', reason: `Translation file referenced by TRANSLATEDTEXTPATH was not found`, failedValue: translatedRef });
+        log(`! translation missing for ${control}: ${translatedRef}`);
+      }
+    }
+
+    // search_tsv: metadata text (weight A) + all text versions (weight B).
     const metaText = Object.values(metadata).join(' ');
+    const allVersionText = [extractedText, translationText].filter(Boolean).join('\n');
     await query(
       `UPDATE documents SET search_tsv =
          setweight(to_tsvector('english', coalesce($2,'')), 'A') ||
          setweight(to_tsvector('english', coalesce($3,'')), 'B')
        WHERE id=$1`,
-      [docId, metaText, extractedText || '']
+      [docId, metaText, allVersionText]
     );
 
     // ensure a review state row
@@ -293,8 +554,57 @@ export async function runImport(opts: ImportOptions): Promise<ImportResult> {
     await query(`UPDATE loadfile_imports SET docs_done=$2, pages_done=$3 WHERE id=$1`, [setId, docCount, totalPages]);
   }
 
-  await query(`UPDATE loadfile_imports SET doc_count=$2, page_count=$3, docs_done=$2, pages_done=$3, status='completed', phase='completed' WHERE id=$1`, [setId, docCount, totalPages]);
-  log(`Import complete: ${docCount} documents, ${totalPages} pages${overwritten.length ? `, ${overwritten.length} existing control number(s) updated in place` : ''}`);
+  // --- Family post-pass (request 7): resolve explicit parent links now that every
+  // item is loaded. A parent not found in the case is reported (with its child
+  // flagged) rather than leaving the child as an unrelated document.
+  let familiesLinked = 0;
+  for (const { control, parent } of parentRefs) {
+    let found = allControlKeys.has(parent.toUpperCase());
+    if (!found) {
+      const r = await query<{ one: number }>(
+        `SELECT 1 AS one FROM documents WHERE case_id=$1 AND upper(control_number)=upper($2) LIMIT 1`,
+        [opts.caseId, parent]
+      );
+      found = r.rows.length > 0;
+    }
+    if (found) {
+      familiesLinked++;
+    } else {
+      await fail({ controlNumber: control, code: 'parent_not_found', reason: `Parent control number not found in the case`, failedValue: parent });
+      // Flag the child so it is visibly orphaned, not silently unrelated.
+      await query(
+        `UPDATE documents SET metadata = metadata || jsonb_build_object('Parent Unresolved', $3::text)
+         WHERE case_id=$1 AND control_number=$2`,
+        [opts.caseId, control, parent]
+      );
+      log(`! parent not found for ${control}: ${parent}`);
+    }
+  }
+
+  // --- per-import verification counts (request 9) ----------------------------
+  const verification = {
+    items_received: dat.rows.length,
+    items_created: itemsCreated,
+    items_updated: itemsUpdated,
+    text_indexed: textIndexed,
+    text_missing: textMissing,
+    text_by_language: textByLanguage,
+    natives_stored: nativesStored,
+    images_stored: imagesStored,
+    pages: totalPages,
+    threads_populated: threadsPopulated,
+    families_linked: familiesLinked,
+    translations_created: translationsCreated,
+    unmapped_columns: unmappedColumns,
+    failures: failureCount,
+  };
+
+  await query(
+    `UPDATE loadfile_imports SET doc_count=$2, page_count=$3, docs_done=$2, pages_done=$3,
+       status='completed', phase='completed', verification=$4 WHERE id=$1`,
+    [setId, docCount, totalPages, JSON.stringify(verification)]
+  );
+  log(`Import complete: ${docCount} documents, ${totalPages} pages, ${textIndexed} text indexed, ${textMissing} text missing, ${nativesStored} native(s) stored, ${threadsPopulated} threaded, ${familiesLinked} family link(s), ${translationsCreated} translation(s)${failureCount ? `, ${failureCount} failure(s)` : ''}${overwritten.length ? `, ${overwritten.length} updated in place` : ''}`);
   return { setId, docCount, pageCount: totalPages, overwritten };
 }
 

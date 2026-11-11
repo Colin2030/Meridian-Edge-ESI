@@ -54,6 +54,7 @@ interface ClaimedRow {
   xml_filename: string | null;
   source_kind: string | null;
   original_files: any;
+  field_mapping: any;
   imported_by: number | null;
   attempts: number;
   was_processing: boolean;
@@ -86,7 +87,7 @@ async function claimNext(): Promise<ClaimedRow | null> {
          LIMIT 1
       )
       RETURNING i.id, i.case_id, i.name, i.dat_filename, i.opt_filename, i.xml_filename,
-                i.source_kind, i.original_files, i.imported_by, i.attempts,
+                i.source_kind, i.original_files, i.field_mapping, i.imported_by, i.attempts,
                 (i.attempts > 1) AS was_processing`,
     []
   );

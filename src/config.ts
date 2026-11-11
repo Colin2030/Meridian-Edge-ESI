@@ -27,6 +27,11 @@ export const config = {
   uploadsDir: process.env.UPLOADS_DIR
     ? path.resolve(process.env.UPLOADS_DIR)
     : path.resolve(process.cwd(), 'uploads'),
+  // Content-addressed blob store root (natives, audit-report attachments, batch
+  // files). Defaults to <uploadsDir>/blobs; override with BLOBS_DIR (absolute).
+  blobsDir: process.env.BLOBS_DIR
+    ? path.resolve(process.env.BLOBS_DIR)
+    : path.resolve(process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.resolve(process.cwd(), 'uploads'), 'blobs'),
   webDist: path.resolve(process.cwd(), 'web', 'dist'),
   // Server-side ingest from a network/folder location (mounted SMB/NFS share or
   // BLOB storage mounted as a path). Only paths *within* one of these absolute

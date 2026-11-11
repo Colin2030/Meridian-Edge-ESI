@@ -135,7 +135,7 @@ export function findStagedSource(caseId: number, imp: any): string | null {
 
 export type ResolvedSource =
   | { kind: 'edrm'; xmlPath: string; sourceRoot: string }
-  | { kind: 'dat'; datPath: string; optPath?: string; imagesDir: string }
+  | { kind: 'dat'; datPath: string; optPath?: string; imagesDir: string; sourceRoot: string }
   | { kind: 'missing' };
 
 /**
@@ -182,7 +182,10 @@ export function resolveImportSource(caseId: number, imp: any): ResolvedSource {
     if (!fs.existsSync(imagesDir) || fs.readdirSync(imagesDir).length === 0) {
       flattenImages(allFiles, imagesDir);
     }
-    return { kind: 'dat', datPath: datFiles[0], optPath: optFiles[0], imagesDir };
+    // sourceRoot = the recorded network/folder location: TEXTPATH / NATIVEPATH /
+    // TRANSLATEDTEXTPATH refs are resolved against it (text/native files are not
+    // flattened into imagesDir).
+    return { kind: 'dat', datPath: datFiles[0], optPath: optFiles[0], imagesDir, sourceRoot };
   }
 
   // Upload imports (zip or loose files): discover the staged _incoming_* dir.
@@ -211,7 +214,9 @@ export function resolveImportSource(caseId: number, imp: any): ResolvedSource {
   if (!fs.existsSync(imagesDir) || fs.readdirSync(imagesDir).length === 0) {
     flattenImages(allFiles, imagesDir);
   }
-  return { kind: 'dat', datPath: datFiles[0], optPath: optFiles[0], imagesDir };
+  // sourceRoot = the extracted package root; TEXTPATH / NATIVEPATH /
+  // TRANSLATEDTEXTPATH refs resolve against it (they are not flattened into _images).
+  return { kind: 'dat', datPath: datFiles[0], optPath: optFiles[0], imagesDir, sourceRoot: scanRoot };
 }
 
 /**
@@ -273,6 +278,8 @@ export async function runClaimedImport(imp: any): Promise<{ ok: boolean; reason?
     datPath: resolved.datPath,
     optPath: resolved.optPath,
     imagesDir: resolved.imagesDir,
+    sourceRoot: resolved.sourceRoot,
+    fieldMapping: imp.field_mapping ?? null,
     importedBy,
     setName,
     ocr: config.enableOcr,

@@ -105,6 +105,28 @@ function validateIngestPath(input: string): PathCheck {
 }
 
 
+// ---- Optional field-mapping parse -------------------------------------------
+// The importer may bind its own column names to platform fields without renaming
+// columns, e.g. {"DATESENT":"date","THREADID":"thread_id"}. Accept it as a JSON
+// object or a JSON string in the multipart/body field `fieldMapping`. Returns a
+// clean string->string map, or null when absent/empty/invalid (invalid is
+// ignored rather than failing the whole import).
+function parseFieldMapping(input: unknown): Record<string, string> | null {
+  if (input == null || input === '') return null;
+  let obj: any = input;
+  if (typeof input === 'string') {
+    try { obj = JSON.parse(input); } catch { return null; }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof k === 'string' && typeof v === 'string' && k.trim() && v.trim()) {
+      out[k] = v;
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // ---- POST /api/cases/:caseId/imports — upload + kick ingest ------------------
 // RBAC: case_manager or above on the case (system_admin passes globally).
 // Exported handler so both the cookie route and the token-auth /api/v1 route
@@ -188,14 +210,15 @@ export const uploadImportHandler = async (req: AuthedRequest, res: any) => {
   }
 
   const setName = (req.body?.name as string)?.trim() || path.basename(datPath);
+  const fieldMapping = parseFieldMapping(req.body?.fieldMapping);
   void imagesDir; // flattened above so the worker finds _images/ when it claims this row
 
   // Create the import row as 'queued' so the durable worker renders it (one at a
   // time, restart-safe). The UI polls the same importId. Return 202 promptly.
   const ins = await query<{ id: number }>(
-    `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, status, phase, source_kind, original_files, enqueued_at)
-     VALUES ($1,$2,$3,$4,$5,'queued','parsing',$6,$7, now()) RETURNING id`,
-    [caseId, setName, path.basename(datPath), optPath ? path.basename(optPath) : null, req.user!.id, sourceKind, JSON.stringify(originalFiles)]
+    `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, status, phase, source_kind, original_files, field_mapping, enqueued_at)
+     VALUES ($1,$2,$3,$4,$5,'queued','parsing',$6,$7,$8, now()) RETURNING id`,
+    [caseId, setName, path.basename(datPath), optPath ? path.basename(optPath) : null, req.user!.id, sourceKind, JSON.stringify(originalFiles), fieldMapping ? JSON.stringify(fieldMapping) : null]
   );
   const importId = ins.rows[0].id;
 
@@ -281,14 +304,15 @@ export const pathImportHandler = async (req: AuthedRequest, res: any) => {
     const imageCount = allFiles.filter((p) => ['.tif', '.tiff', '.pdf'].includes(path.extname(p).toLowerCase())).length;
 
     const setName = (req.body?.name as string)?.trim() || path.basename(datPath);
+    const fieldMapping = parseFieldMapping(req.body?.fieldMapping);
 
     // Record the import as 'queued' (source_kind='path'); when the worker claims
     // the row it re-resolves the loadfile and flattens images from the recorded
     // source location, so no local image copy is needed here.
     const ins = await query<{ id: number }>(
-      `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, status, phase, source_kind, original_files, enqueued_at)
-       VALUES ($1,$2,$3,$4,$5,'queued','parsing',$6,$7, now()) RETURNING id`,
-      [caseId, setName, path.basename(datPath), optPath ? path.basename(optPath) : null, req.user!.id, 'path', JSON.stringify([{ path: sourceRoot, dat: path.basename(datPath) }])]
+      `INSERT INTO loadfile_imports (case_id, name, dat_filename, opt_filename, imported_by, status, phase, source_kind, original_files, field_mapping, enqueued_at)
+       VALUES ($1,$2,$3,$4,$5,'queued','parsing',$6,$7,$8, now()) RETURNING id`,
+      [caseId, setName, path.basename(datPath), optPath ? path.basename(optPath) : null, req.user!.id, 'path', JSON.stringify([{ path: sourceRoot, dat: path.basename(datPath) }]), fieldMapping ? JSON.stringify(fieldMapping) : null]
     );
     const importId = ins.rows[0].id;
 

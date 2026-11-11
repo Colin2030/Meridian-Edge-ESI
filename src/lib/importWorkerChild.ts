@@ -30,7 +30,7 @@ async function main(): Promise<number> {
   }
   const { rows } = await query(
     `SELECT id, case_id, name, dat_filename, opt_filename, xml_filename,
-            source_kind, original_files, imported_by, attempts
+            source_kind, original_files, field_mapping, imported_by, attempts
        FROM loadfile_imports WHERE id=$1`,
     [importId]
   );

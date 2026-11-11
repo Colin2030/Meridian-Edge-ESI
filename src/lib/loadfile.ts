@@ -130,6 +130,19 @@ const FIELD_ALIASES: Record<string, string[]> = {
   to: ['to', 'recipient', 'recipients'],
   subject: ['subject', 'title', 're'],
   filename: ['filename', 'file_name', 'file'],
+  // --- v1.4.0 Remontoire delivery: threading, native type, family, translations ---
+  thread_id: ['threadid', 'thread_id', 'conversationid', 'conversationindex', 'threadindex'],
+  thread_position: ['threadposition', 'thread_position', 'position'],
+  thread_size: ['threadsize', 'thread_size'],
+  thread_subject: ['threadsubject', 'thread_subject'],
+  message_id: ['messageid', 'message_id', 'msgid'],
+  in_reply_to: ['inreplyto', 'in_reply_to'],
+  parent_control_number: ['parentid', 'parent_id', 'parentcontrolnumber', 'parent_control_number', 'parentdocid'],
+  file_type: ['filetype', 'file_type', 'mimetype', 'mime_type', 'mime', 'contenttype'],
+  language: ['language', 'lang', 'doclanguage', 'languagecode'],
+  translated_text_path: ['translatedtextpath', 'translated_text_path', 'translationtextpath'],
+  translated_from: ['translatedfrom', 'translated_from', 'sourcelanguage'],
+  translated_to: ['translatedto', 'translated_to', 'targetlanguage', 'translationlanguage'],
 };
 
 export function identifyField(fieldNames: string[], target: keyof typeof FIELD_ALIASES): string | null {
@@ -143,10 +156,48 @@ export function identifyField(fieldNames: string[], target: keyof typeof FIELD_A
   return null;
 }
 
-export function buildFieldMap(fieldNames: string[]): Record<string, string | null> {
+/**
+ * Build the sourceColumn → platformField map.
+ *
+ * `mapping` is the optional integrator-supplied binding of their OWN column names
+ * to platform fields, e.g. {"DATESENT":"date","THREADID":"thread_id"} — it lets an
+ * integrator bind columns without renaming them. It is applied FIRST (an explicit
+ * binding always wins), then the built-in aliases fill any remaining gaps. A
+ * mapping value may be either a platform field key (e.g. "thread_id") or one of its
+ * aliases (e.g. "date"); both resolve to the canonical platform field.
+ */
+export function buildFieldMap(
+  fieldNames: string[],
+  mapping?: Record<string, string> | null
+): Record<string, string | null> {
   const map: Record<string, string | null> = {};
-  (Object.keys(FIELD_ALIASES) as (keyof typeof FIELD_ALIASES)[]).forEach((k) => {
-    map[k] = identifyField(fieldNames, k);
+  const keys = Object.keys(FIELD_ALIASES) as (keyof typeof FIELD_ALIASES)[];
+
+  // 1. Apply explicit integrator mapping (sourceColumn -> platformField).
+  if (mapping) {
+    // Resolve each mapping target (a platform field key OR an alias) to a canonical key.
+    const canonical = (target: string): keyof typeof FIELD_ALIASES | null => {
+      const norm = target.toLowerCase().replace(/[\s_-]/g, '');
+      if ((FIELD_ALIASES as any)[norm]) return norm as keyof typeof FIELD_ALIASES;
+      for (const k of keys) {
+        if (k === norm) return k;
+        if (FIELD_ALIASES[k].some((a) => a.replace(/[\s_-]/g, '') === norm)) return k;
+      }
+      return null;
+    };
+    for (const [sourceColumn, platformTarget] of Object.entries(mapping)) {
+      const key = canonical(platformTarget);
+      if (!key) continue;
+      // Only bind when the source column actually exists in the loadfile header.
+      const actual = fieldNames.find((f) => f.toLowerCase().replace(/[\s_-]/g, '') === sourceColumn.toLowerCase().replace(/[\s_-]/g, ''))
+        || (fieldNames.includes(sourceColumn) ? sourceColumn : undefined);
+      if (actual) map[key] = actual;
+    }
+  }
+
+  // 2. Fill any unmapped platform field from the built-in aliases.
+  keys.forEach((k) => {
+    if (map[k] == null) map[k] = identifyField(fieldNames, k);
   });
   return map;
 }

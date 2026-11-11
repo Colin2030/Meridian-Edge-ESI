@@ -9,3 +9,4 @@ npm-debug.log*
 .DS_Store
 sample-data/
 *.exit
+.env.dev
