@@ -287,11 +287,26 @@ router.get('/documents/:docId', requireAuth, async (req: AuthedRequest, res) => 
     threadCount = (await query<any>(`SELECT count(*)::int AS n FROM documents WHERE case_id=$1 AND thread_id=$2`, [doc.case_id, doc.thread_id])).rows[0].n;
   }
 
+  // A native is available either via the content-addressed blob store (batch
+  // ingest) or a legacy on-disk path (loadfile import). Offer it for download
+  // through the session endpoint, which restores the original filename + MIME.
+  const hasNative = !!(doc.native_sha256 || doc.native_path);
+
   res.json({
     id: doc.id, caseId: doc.case_id, controlNumber: doc.control_number,
     nativeType: doc.native_type, nativePath: doc.native_path, pageCount: doc.page_count,
     hasText: doc.has_text, extractedText: doc.extracted_text, metadata: doc.metadata,
     threadId: doc.thread_id, threadSubject: doc.thread_subject, threadCount,
+    threadPosition: doc.thread_position, threadSize: doc.thread_size,
+    parentControlNumber: doc.parent_control_number || null,
+    // Native download (#3/#4): original file, original name + declared/detected type.
+    hasNative,
+    nativeFilename: doc.native_filename || null,
+    nativeMime: doc.native_mime || null,
+    nativeDownloadUrl: hasNative ? `/api/cases/${doc.case_id}/documents/${doc.id}/native` : null,
+    // Review image (#4): rendered PDF/TIFF pages, shown in the existing viewer.
+    imageFormat: doc.image_format || null,
+    imagePageCount: doc.image_page_count || null,
     pages: pages.map((p) => ({ pageNo: p.page_no, url: `/api/files/${encodeURI(p.image_path)}` })),
     nativeUrl: doc.native_path ? `/api/files/${encodeURI(doc.native_path)}` : null,
     review, tags, bookmarked, comments, role,
@@ -311,19 +326,22 @@ router.get('/documents/:docId/thread', requireAuth, async (req: AuthedRequest, r
 
   // Order by the resolved document date (Concordance DATE then EDRM Date Sent),
   // falling back to control number for stable ordering when dates are absent/equal.
+  // Order by the supplied thread position first (request 6), then fall back to the
+  // resolved document date, then control number for stable ordering.
   const messages = (await query<any>(
-    `SELECT d.id, d.control_number, d.metadata,
+    `SELECT d.id, d.control_number, d.metadata, d.thread_position, d.thread_size,
             ${displayDateSql('d.metadata')} AS date_sent,
             ${displaySubjectSql('d.metadata')} AS subject,
             rs.status AS review_status
      FROM documents d LEFT JOIN review_states rs ON rs.document_id=d.id
-     WHERE d.case_id=$1 AND d.thread_id=$2
-     ORDER BY ${displayDateSql('d.metadata')} ASC NULLS LAST, d.control_number ASC`,
+     WHERE d.case_id=$1 AND d.thread_id=$2 AND d.deleted_at IS NULL
+     ORDER BY d.thread_position ASC NULLS LAST, ${displayDateSql('d.metadata')} ASC NULLS LAST, d.control_number ASC`,
     [caseId, threadId]
   )).rows;
 
   res.json({
     threadId,
+    threadSize: messages[0]?.thread_size || messages.length,
     messages: messages.map((m) => ({
       id: m.id,
       controlNumber: m.control_number,
@@ -331,6 +349,7 @@ router.get('/documents/:docId/thread', requireAuth, async (req: AuthedRequest, r
       from: m.metadata?.FROM || m.metadata?.['Email From'] || '',
       to: m.metadata?.TO || m.metadata?.['Email To'] || '',
       date: m.date_sent || '',
+      position: m.thread_position,
       reviewStatus: m.review_status || 'unreviewed',
       current: m.id === docId,
     })),
