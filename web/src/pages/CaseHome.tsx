@@ -4,7 +4,7 @@ import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import {
   FileText, Mail, Users, ChevronLeft, ArrowRight, UploadCloud, Settings2,
-  ListChecks, Tag as TagIcon, FolderOpen, BookMarked,
+  ListChecks, Tag as TagIcon, FolderOpen, BookMarked, Activity,
 } from 'lucide-react';
 
 // ---- Types for the ECA metrics payload (GET /api/cases/:caseId/eca) ----------
@@ -92,6 +92,7 @@ export default function CaseHome() {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <Link to={`/cases/${caseId}/binders`} className="btn-outline"><BookMarked size={16} /> Binders</Link>
+          <Link to={`/cases/${caseId}/activity`} className="btn-outline"><Activity size={16} /> Activity</Link>
           {canManage && (
             <>
               <Link to={`/cases/${caseId}/import`} className="btn-outline"><UploadCloud size={16} /> Add case data</Link>

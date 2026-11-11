@@ -6,7 +6,7 @@ import { fmtDateTime } from '../lib/format';
 import {
   ChevronLeft, UploadCloud, FileText, FileSpreadsheet, FileType2, FileArchive,
   X, CheckCircle2, AlertTriangle, Loader2, Info, History, ArrowRight,
-  Network, Server, RefreshCw, RotateCcw,
+  Network, Server, RefreshCw, RotateCcw, Trash2,
 } from 'lucide-react';
 
 interface CaseInfo { id: number; name: string; case_number: string; role: string; }
@@ -116,6 +116,24 @@ export default function AddCaseData() {
       loadHistory();
     } catch (e: any) {
       setActionErr(e?.message || 'Could not reset this import.');
+    } finally {
+      setActionBusy(null);
+    }
+  }, [caseId, loadHistory]);
+
+  // #10 Delete an import's documents (soft, 7-day retention). Confirm first.
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [deleteNote, setDeleteNote] = useState<string>('');
+  const deleteImport = useCallback(async (id: number) => {
+    setActionErr(''); setActionBusy(id);
+    try {
+      const r = await api.del<any>(`/api/cases/${caseId}/imports/${id}`);
+      const n = r?.documentsDeleted ?? 0;
+      setDeleteNote(`Import #${id} deleted (${n} document${n === 1 ? '' : 's'}). Restorable within ${r?.retentionDays ?? 7} days.`);
+      setConfirmDeleteId(null);
+      loadHistory();
+    } catch (e: any) {
+      setActionErr(e?.message || 'Could not delete this import.');
     } finally {
       setActionBusy(null);
     }
@@ -580,7 +598,14 @@ export default function AddCaseData() {
                             <RotateCcw size={13} /> Reset
                           </button>
                         )}
-                        {!canRetry && !canReset && <span className="text-xs text-slate-300">—</span>}
+                        <button
+                          onClick={() => setConfirmDeleteId(h.id)}
+                          disabled={actionBusy === h.id}
+                          className="btn-outline inline-flex items-center gap-1 px-2 py-1 text-xs border-rose-200 text-rose-600 hover:bg-rose-50"
+                          title="Delete this import's documents (soft, 7-day retention)"
+                        >
+                          <Trash2 size={13} /> Delete
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -594,7 +619,29 @@ export default function AddCaseData() {
             <AlertTriangle size={13} /> {actionErr}
           </div>
         )}
+        {deleteNote && (
+          <div className="mt-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2 inline-flex items-center gap-1">
+            <CheckCircle2 size={13} /> {deleteNote}
+          </div>
+        )}
       </div>
+
+      {confirmDeleteId != null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal-950/60 p-4" onClick={() => setConfirmDeleteId(null)}>
+          <div onClick={(e) => e.stopPropagation()} className="w-full max-w-md card p-6">
+            <h3 className="text-lg font-bold text-rose-700 flex items-center gap-2"><AlertTriangle size={18} /> Delete this import?</h3>
+            <p className="text-sm text-slate-600 mt-2">
+              All documents loaded by import <strong>#{confirmDeleteId}</strong> will be soft-deleted and hidden from review. They can be restored within the 7-day retention window, after which they are permanently removed.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button onClick={() => setConfirmDeleteId(null)} className="btn-ghost" disabled={actionBusy === confirmDeleteId}>Cancel</button>
+              <button onClick={() => deleteImport(confirmDeleteId)} className="btn-primary bg-rose-600 hover:bg-rose-700" disabled={actionBusy === confirmDeleteId}>
+                {actionBusy === confirmDeleteId ? 'Deleting…' : 'Delete import'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

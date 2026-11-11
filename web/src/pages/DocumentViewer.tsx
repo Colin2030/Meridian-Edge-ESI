@@ -7,7 +7,7 @@ import { PdfView } from '../components/PdfView';
 import {
   ChevronLeft, ChevronRight, Bookmark, ZoomIn, ZoomOut, FileType2, FileText,
   MessageSquare, Tag as TagIcon, Plus, Send, Info, ArrowLeft, ArrowRight, X, Download,
-  MessagesSquare, CornerDownRight,
+  MessagesSquare, CornerDownRight, Languages, Paperclip, AlertTriangle, Trash2,
 } from 'lucide-react';
 
 interface Tag { id: number; name: string; colour: string; }
@@ -16,12 +16,25 @@ interface DocDetail {
   pageCount: number; hasText: boolean; extractedText: string | null; metadata: Record<string, string>;
   pages: { pageNo: number; url: string }[]; nativeUrlx?: string;
   threadId: string | null; threadSubject: string | null; threadCount: number;
+  threadPosition?: number | null; threadSize?: number | null; parentControlNumber?: string | null;
+  hasNative?: boolean; nativeFilename?: string | null; nativeMime?: string | null;
+  nativeDownloadUrl?: string | null; imageFormat?: string | null; imagePageCount?: number | null;
   review: { status: string; reviewed_at?: string; reviewed_by?: string };
   tags: Tag[]; bookmarked: boolean; comments: any[]; role: string;
 }
 interface ThreadMsg {
   id: number; controlNumber: string; subject: string; from: string; to: string;
-  date: string; reviewStatus: string; current: boolean;
+  date: string; reviewStatus: string; current: boolean; position?: number | null;
+}
+interface TextVersion {
+  id: number; language: string; kind: string; isOriginal: boolean;
+  translatedFrom: string | null; method: string | null; charLength: number | null; content: string | null;
+}
+interface Family {
+  controlNumber: string; parentControlNumber: string | null; parentNotFound: boolean;
+  parent: { id: number; controlNumber: string; nativeType: string | null } | null;
+  attachments: { id: number; controlNumber: string; nativeType: string | null; nativeFilename: string | null; current: boolean }[];
+  isFamily: boolean;
 }
 
 export default function DocumentViewer() {
@@ -36,18 +49,42 @@ export default function DocumentViewer() {
   const [newComment, setNewComment] = useState('');
   const [showTagMenu, setShowTagMenu] = useState(false);
   const [thread, setThread] = useState<ThreadMsg[]>([]);
+  const [versions, setVersions] = useState<TextVersion[]>([]);
+  const [selVersion, setSelVersion] = useState<number | null>(null);
+  const [family, setFamily] = useState<Family | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
     api.get<DocDetail>(`/api/documents/${docId}`).then((d) => { setDoc(d); setPage(1); });
   }, [docId]);
   useEffect(() => { load(); }, [load]);
-  // Fetch the conversation thread siblings (chronological) for the thread panel.
+  // Fetch the conversation thread siblings (ordered by position) for the thread panel.
   useEffect(() => {
     setThread([]);
     api.get<{ messages: ThreadMsg[] }>(`/api/documents/${docId}/thread`)
       .then((r) => setThread(r.messages || []))
       .catch(() => setThread([]));
   }, [docId]);
+  // #1 Translations: fetch every text version; default to the ORIGINAL.
+  useEffect(() => {
+    setVersions([]); setSelVersion(null);
+    api.get<{ versions: TextVersion[] }>(`/api/cases/${caseId}/documents/${docId}/text-versions`)
+      .then((r) => {
+        const vs = r.versions || [];
+        setVersions(vs);
+        const orig = vs.find((v) => v.isOriginal) || vs[0];
+        if (orig) setSelVersion(orig.id);
+      })
+      .catch(() => setVersions([]));
+  }, [caseId, docId]);
+  // #3 Families: fetch parent + attachments.
+  useEffect(() => {
+    setFamily(null);
+    api.get<Family>(`/api/cases/${caseId}/documents/${docId}/family`)
+      .then((f) => setFamily(f))
+      .catch(() => setFamily(null));
+  }, [caseId, docId]);
   useEffect(() => {
     api.get<any>(`/api/cases/${caseId}`).then((c) => setCaseTags(c.tags || []));
     api.get<{ documents: { id: number }[] }>(`/api/case/${caseId}/documents?limit=200&sort=control_number`)
@@ -97,12 +134,30 @@ export default function DocumentViewer() {
     await api.post(`/api/documents/${doc.id}/comments`, { body: newComment.trim() });
     setNewComment(''); load();
   };
+  // #10 Soft-delete this single document (manager only), then go back to the list.
+  const deleteDoc = async () => {
+    if (!doc) return;
+    setBusy(true);
+    try {
+      await api.del(`/api/cases/${caseId}/documents/${doc.id}`);
+      nav(`/cases/${caseId}/review`, { state: { flash: `Document ${doc.controlNumber} deleted. It can be restored within 7 days.` } });
+    } catch { setBusy(false); setConfirmDelete(false); }
+  };
 
   if (!doc) return <div className="min-h-[60vh] grid place-items-center text-slate-400">Loading document…</div>;
   const m = doc.metadata || {};
   const rm = reviewMeta(doc.review.status);
   const isPdf = doc.nativeType === 'pdf' && doc.nativeUrl;
   const totalPages = doc.pageCount || doc.pages.length || 1;
+  const canManage = doc.role === 'system_admin' || doc.role === 'case_manager';
+  const activeVersion = versions.find((v) => v.id === selVersion) || null;
+  const langLabel = (v: TextVersion) => {
+    const lang = (v.language || 'und').toUpperCase();
+    const kind = v.isOriginal ? 'Original' : (v.kind === 'translation' ? 'Translation' : v.kind === 'ocr' ? 'OCR' : 'Extracted');
+    const via = !v.isOriginal && v.method ? ` · ${v.method}` : '';
+    const from = !v.isOriginal && v.translatedFrom ? ` (from ${v.translatedFrom.toUpperCase()})` : '';
+    return `${lang} · ${kind}${from}${via}`;
+  };
 
   return (
     <div className="mx-auto max-w-[1600px] px-5 py-4">
@@ -136,10 +191,20 @@ export default function DocumentViewer() {
               <span className="text-sm text-slate-600">Page {page} / {totalPages}</span>
               <button className="btn-ghost" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}><ChevronRight size={16} /></button>
             </div>
-            <div className="flex items-center gap-1">
-              <button className="btn-ghost" onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.2).toFixed(2)))}><ZoomOut size={16} /></button>
-              <span className="text-sm text-slate-500 w-12 text-center">{Math.round(zoom * 100)}%</span>
-              <button className="btn-ghost" onClick={() => setZoom((z) => Math.min(3, +(z + 0.2).toFixed(2)))}><ZoomIn size={16} /></button>
+            <div className="flex items-center gap-2">
+              {/* #4 Native download — original file, original filename, declared type */}
+              {doc.hasNative && doc.nativeDownloadUrl && (
+                <a href={doc.nativeDownloadUrl} className="btn-outline py-1.5" download
+                  title={`Download native${doc.nativeFilename ? `: ${doc.nativeFilename}` : ''}${doc.nativeMime ? ` (${doc.nativeMime})` : ''}`}>
+                  <Download size={15} /> Download native
+                  {doc.nativeMime && <span className="text-xs text-slate-400 ml-1">{doc.nativeMime}</span>}
+                </a>
+              )}
+              <div className="flex items-center gap-1 border-l border-slate-200 pl-2">
+                <button className="btn-ghost" onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.2).toFixed(2)))}><ZoomOut size={16} /></button>
+                <span className="text-sm text-slate-500 w-12 text-center">{Math.round(zoom * 100)}%</span>
+                <button className="btn-ghost" onClick={() => setZoom((z) => Math.min(3, +(z + 0.2).toFixed(2)))}><ZoomIn size={16} /></button>
+              </div>
             </div>
           </div>
           <div className="flex-1 overflow-auto bg-slate-200/60 p-5">
@@ -216,6 +281,15 @@ export default function DocumentViewer() {
                 {doc.tags.length === 0 && <span className="text-xs text-slate-400">No tags</span>}
               </div>
             </div>
+
+            {/* #10 Delete this document (case manager / admin) */}
+            {canManage && (
+              <div className="mt-4 border-t border-slate-100 pt-3">
+                <button onClick={() => setConfirmDelete(true)} className="btn-outline w-full border-rose-200 text-rose-600 hover:bg-rose-50">
+                  <Trash2 size={15} /> Delete document
+                </button>
+              </div>
+            )}
           </div>
 
           {/* conversation thread panel — only for emails in a multi-message thread */}
@@ -258,7 +332,50 @@ export default function DocumentViewer() {
                   );
                 })}
               </ol>
-              <p className="text-[11px] text-slate-400 mt-2">Grouped by subject, ordered by date sent.</p>
+              <p className="text-[11px] text-slate-400 mt-2">Ordered by position in the thread.</p>
+            </div>
+          )}
+
+          {/* #3 Family — parent email + its attachments, with unfound-parent flag */}
+          {family && family.isFamily && (
+            <div className="card p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Paperclip size={16} className="text-accent-dark" />
+                <h2 className="text-sm font-semibold text-navy-900">Family</h2>
+                {family.attachments.length > 0 && (
+                  <span className="badge bg-accent/10 text-accent-dark">{family.attachments.length} attachment{family.attachments.length === 1 ? '' : 's'}</span>
+                )}
+              </div>
+              {family.parentNotFound && (
+                <div className="mb-2 flex items-start gap-1.5 rounded-md bg-amber-50 border border-amber-200 px-2 py-1.5 text-xs text-amber-700">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  <span>This item references a parent ({family.parentControlNumber}) that was not found in this case.</span>
+                </div>
+              )}
+              {family.parent && (
+                <Link to={`/cases/${caseId}/documents/${family.parent.id}`}
+                  className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition ${family.parent.controlNumber === family.controlNumber ? 'bg-accent/[0.08] ring-1 ring-accent/30' : 'hover:bg-slate-50'}`}>
+                  <MessageSquare size={13} className="text-slate-400" />
+                  <span className="min-w-0 flex-1 truncate">Parent · {family.parent.controlNumber}</span>
+                  <span className="badge bg-slate-100 text-slate-500">{family.parent.nativeType || '—'}</span>
+                </Link>
+              )}
+              <ol className="space-y-0.5 mt-0.5 max-h-[28vh] overflow-auto">
+                {family.attachments.map((a) => (
+                  <li key={a.id}>
+                    <Link to={`/cases/${caseId}/documents/${a.id}`}
+                      className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition ${a.current ? 'bg-accent/[0.08] ring-1 ring-accent/30' : 'hover:bg-slate-50'}`}>
+                      <CornerDownRight size={13} className="text-slate-300" />
+                      <span className="min-w-0 flex-1 truncate">{a.nativeFilename || a.controlNumber}</span>
+                      {a.current && <span className="text-[10px] uppercase tracking-wide text-accent-dark font-semibold">viewing</span>}
+                      <span className="badge bg-slate-100 text-slate-500">{a.nativeType || '—'}</span>
+                    </Link>
+                  </li>
+                ))}
+                {family.attachments.length === 0 && !family.parent && (
+                  <li className="text-xs text-slate-400 px-2">No related items found.</li>
+                )}
+              </ol>
             </div>
           )}
 
@@ -283,8 +400,37 @@ export default function DocumentViewer() {
                 </dl>
               )}
               {tab === 'text' && (
-                doc.hasText && doc.extractedText ? <pre className="whitespace-pre-wrap text-sm text-slate-700 font-sans">{doc.extractedText}</pre>
-                  : <p className="text-sm text-slate-400">No extracted text. Run import with OCR enabled to populate searchable text for image-only documents.</p>
+                versions.length > 0 ? (
+                  <div>
+                    {/* #1 Translation / version switcher — ORIGINAL selected by default */}
+                    <div className="flex items-center gap-2 mb-3 flex-wrap">
+                      <Languages size={15} className="text-accent-dark" />
+                      {versions.length > 1 ? (
+                        <select
+                          className="input py-1.5 text-sm max-w-full"
+                          value={selVersion ?? ''}
+                          onChange={(e) => setSelVersion(Number(e.target.value))}
+                        >
+                          {versions.map((v) => (
+                            <option key={v.id} value={v.id}>{langLabel(v)}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="badge bg-slate-100 text-slate-600">{langLabel(versions[0])}</span>
+                      )}
+                      {activeVersion && !activeVersion.isOriginal && (
+                        <span className="badge bg-amber-100 text-amber-700" title="This is a translation, not the original text">Translation</span>
+                      )}
+                    </div>
+                    {activeVersion?.content
+                      ? <pre className="whitespace-pre-wrap text-sm text-slate-700 font-sans">{activeVersion.content}</pre>
+                      : <p className="text-sm text-slate-400">This version has no stored text content.</p>}
+                  </div>
+                ) : doc.hasText && doc.extractedText ? (
+                  <pre className="whitespace-pre-wrap text-sm text-slate-700 font-sans">{doc.extractedText}</pre>
+                ) : (
+                  <p className="text-sm text-slate-400">No extracted text. Run import with OCR enabled to populate searchable text for image-only documents.</p>
+                )
               )}
               {tab === 'comments' && (
                 <div>
@@ -310,6 +456,21 @@ export default function DocumentViewer() {
           <p className="text-center text-xs text-slate-400">Tip: use <kbd className="rounded bg-slate-100 px-1">J</kbd>/<kbd className="rounded bg-slate-100 px-1">K</kbd> for next/previous document.</p>
         </div>
       </div>
+
+      {confirmDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal-950/60 p-4" onClick={() => setConfirmDelete(false)}>
+          <div onClick={(e) => e.stopPropagation()} className="w-full max-w-md card p-6">
+            <h3 className="text-lg font-bold text-rose-700 flex items-center gap-2"><AlertTriangle size={18} /> Delete this document?</h3>
+            <p className="text-sm text-slate-600 mt-2">
+              Document <strong>{doc.controlNumber}</strong> will be soft-deleted and hidden from review. It can be restored within the 7-day retention window, after which it is permanently removed.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button onClick={() => setConfirmDelete(false)} className="btn-ghost" disabled={busy}>Cancel</button>
+              <button onClick={deleteDoc} className="btn-primary bg-rose-600 hover:bg-rose-700" disabled={busy}>{busy ? 'Deleting…' : 'Delete document'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

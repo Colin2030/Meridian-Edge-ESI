@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { fmtDate } from '../lib/format';
-import { FolderOpen, FileText, CheckCircle2, Bookmark, ArrowRight, ShieldCheck, FolderPlus, Plus, X } from 'lucide-react';
+import { FolderOpen, FileText, CheckCircle2, Bookmark, ArrowRight, ShieldCheck, FolderPlus, Plus, X, Archive } from 'lucide-react';
 
 interface CaseRow {
   id: number; name: string; case_number: string; description: string; status: string; created_at: string;
@@ -20,13 +20,20 @@ const roleCls: Record<string, string> = {
 
 export default function Dashboard() {
   const { user } = useAuth();
+  const loc = useLocation();
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [flash, setFlash] = useState<string>((loc.state as any)?.flash || '');
 
   const canCreate = !!(user?.isSystemAdmin || user?.canCreateCases);
 
-  useEffect(() => { api.get<CaseRow[]>('/api/cases').then(setCases).finally(() => setLoading(false)); }, []);
+  useEffect(() => {
+    setLoading(true);
+    api.get<CaseRow[]>(`/api/cases${showArchived ? '?includeArchived=1' : ''}`)
+      .then(setCases).finally(() => setLoading(false));
+  }, [showArchived]);
 
   return (
     <div className="mx-auto max-w-[1600px] px-5 py-8">
@@ -36,6 +43,9 @@ export default function Dashboard() {
           <p className="text-sm text-slate-500 mt-1">Investigations you have been granted access to.</p>
         </div>
         <div className="flex items-center gap-2">
+          <button onClick={() => setShowArchived((s) => !s)} className={`btn-outline ${showArchived ? 'border-accent text-accent-dark bg-accent/5' : ''}`} title="Show or hide archived cases">
+            <Archive size={16} /> {showArchived ? 'Hide archived' : 'Show archived'}
+          </button>
           {canCreate && (
             <button onClick={() => setCreating(true)} className="btn-primary"><FolderPlus size={16} /> New case</button>
           )}
@@ -44,6 +54,13 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
+      {flash && (
+        <div className="mb-5 flex items-start justify-between gap-3 rounded-md bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+          <span>{flash}</span>
+          <button onClick={() => setFlash('')} className="opacity-70 hover:opacity-100"><X size={15} /></button>
+        </div>
+      )}
 
       {creating && <NewCaseModal onClose={() => setCreating(false)} />}
 
@@ -59,12 +76,15 @@ export default function Dashboard() {
           {cases.map((c) => {
             const pct = c.doc_count ? Math.round((c.reviewed_count / c.doc_count) * 100) : 0;
             return (
-              <Link key={c.id} to={`/cases/${c.id}`} className="card p-5 hover:shadow-panel hover:border-accent/40 transition group">
+              <Link key={c.id} to={`/cases/${c.id}`} className={`card p-5 hover:shadow-panel hover:border-accent/40 transition group ${c.status === 'archived' ? 'bg-slate-50/70 border-dashed' : ''}`}>
                 <div className="flex items-start justify-between">
                   <div className="flex items-center gap-2.5">
                     <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-navy-900/5 text-navy-900"><FolderOpen size={20} /></span>
                     <div>
-                      <div className="font-semibold text-navy-900 leading-tight group-hover:text-accent-dark transition">{c.name}</div>
+                      <div className="font-semibold text-navy-900 leading-tight group-hover:text-accent-dark transition flex items-center gap-1.5">
+                        {c.name}
+                        {c.status === 'archived' && <span className="badge bg-amber-100 text-amber-700"><Archive size={11} /> Archived</span>}
+                      </div>
                       <div className="text-xs text-slate-400 mt-0.5">{c.case_number || '—'} · opened {fmtDate(c.created_at)}</div>
                     </div>
                   </div>

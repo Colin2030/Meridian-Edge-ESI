@@ -9,6 +9,7 @@ import BindersPage from './pages/BindersPage';
 import BinderPage from './pages/BinderPage';
 import DocumentViewer from './pages/DocumentViewer';
 import AddCaseData from './pages/AddCaseData';
+import CaseActivity from './pages/CaseActivity';
 import Admin from './pages/Admin';
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -29,6 +30,7 @@ export default function App() {
       <Route path="/cases/:caseId/binders" element={<Protected><BindersPage /></Protected>} />
       <Route path="/cases/:caseId/binders/:binderId" element={<Protected><BinderPage /></Protected>} />
       <Route path="/cases/:caseId/import" element={<Protected><AddCaseData /></Protected>} />
+      <Route path="/cases/:caseId/activity" element={<Protected><CaseActivity /></Protected>} />
       <Route path="/cases/:caseId/documents/:docId" element={<Protected><DocumentViewer /></Protected>} />
       <Route path="/admin" element={<Protected><Admin /></Protected>} />
       <Route path="*" element={<Navigate to="/" replace />} />
