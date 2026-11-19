@@ -1,6 +1,6 @@
 {
   "name": "meridian-edge",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "description": "Meridian Edge — ESI review platform (PoC)",
   "type": "commonjs",
