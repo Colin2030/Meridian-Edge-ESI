@@ -180,6 +180,25 @@ if [[ -n "$RW_LINE" ]]; then
 else
   mv "$UNIT_SRC.tmp" "$UNIT_SRC"
 fi
+# Guard against a packaging regression: the bundled unit MUST be a template whose
+# __PLACEHOLDER__ tokens were all substituted above. If any remain — or a build-
+# host-specific path leaked into the rendered unit (e.g. the Abacus-VM path when
+# installing elsewhere) — fail loudly instead of installing a broken unit.
+if grep -qE '__[A-Z_]+__' "$UNIT_SRC"; then
+  warn "Unsubstituted placeholder tokens left in the rendered unit:"
+  grep -nE '__[A-Z_]+__' "$UNIT_SRC" >&2 || true
+  die "bundled deploy/meridian-edge.service is not a valid template — aborting."
+fi
+case "$PREFIX" in
+  /home/ubuntu|/home/ubuntu/*) : ;;  # legitimately installing under /home/ubuntu
+  *)
+    if grep -q '/home/ubuntu' "$UNIT_SRC"; then
+      warn "Hardcoded /home/ubuntu path in the rendered unit:"
+      grep -n '/home/ubuntu' "$UNIT_SRC" >&2 || true
+      die "rendered unit does not match install prefix ($PREFIX) — packaging regression, aborting."
+    fi
+    ;;
+esac
 ln -sf "$UNIT_SRC" /etc/systemd/system/meridian-edge.service
 systemctl daemon-reload
 systemctl enable meridian-edge >/dev/null 2>&1 || true

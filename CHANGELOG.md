@@ -5,6 +5,35 @@ Meridian Edge is a **view-only** ESI review platform; these releases change
 packaging, limits and tooling only — they add no ESI processing/forensic
 capability.
 
+## v1.4.1 — 2026-11-19
+
+Packaging-only fix release. Meridian Edge remains a **view-only** ESI review
+platform; this release changes deployment packaging only — no application code
+changes, and it adds no ESI processing, extraction, OCR or forensic capability.
+
+Fixes an on-premise install failure introduced by the bundled systemd unit:
+
+- **Systemd unit is now a proper template.** `deploy/meridian-edge.service` had
+  shipped as a concrete, build-host-specific unit (hardcoded `User=ubuntu`,
+  `WorkingDirectory=/home/ubuntu/meridian-edge`, matching `EnvironmentFile`/
+  `ExecStart`/`Documentation`, and an Abacus-VM-specific
+  `RequiresMountsFor=/home/ubuntu` line). Because it contained no placeholders,
+  `install.sh`'s substitution matched nothing and the unit installed verbatim —
+  so on a standard host systemd failed with *"Job for meridian-edge.service
+  failed because of unavailable resources or another system error"* and the
+  service ran (or failed to run) under the wrong user and paths. The unit is now
+  a template whose `__SERVICE_USER__` / `__SERVICE_GROUP__` / `__PREFIX__` /
+  `__NODE_BIN__` tokens `install.sh` renders to the correct per-host values, and
+  the `RequiresMountsFor=/home/ubuntu` line has been removed.
+- **Installer guard against the regression.** `install.sh` now inspects the
+  rendered unit and aborts with a clear error if any unsubstituted placeholder
+  token remains, or if a `/home/ubuntu` path leaks in when installing to a
+  different prefix — so a future packaging mistake fails loudly instead of
+  installing a broken unit.
+
+No database migrations and no schema changes in this release (the v1.4.0
+migrations `011`–`017` remain current and idempotent).
+
 ## v1.4.0 — 2026-11-11
 
 Remontoire delivery: direct item ingestion, verification, audit trail and
