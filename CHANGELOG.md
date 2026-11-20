@@ -5,6 +5,31 @@ Meridian Edge is a **view-only** ESI review platform; these releases change
 packaging, limits and tooling only — they add no ESI processing/forensic
 capability.
 
+## v1.4.2 — 2026-11-20
+
+Reliability / connection-hardening fix. Meridian Edge remains a **view-only** ESI
+review platform; this release hardens how the application handles its database
+connection during batch finalisation — it adds **no new capability** and no ESI
+processing, extraction, OCR or forensic capability.
+
+Fixes a batch-finalise failure on managed/hosted PostgreSQL that aggressively
+closes idle sessions (`terminating connection due to idle-session timeout`):
+
+- **Connection keepalive** on the pool (`keepAlive`, 10s initial delay) so sockets
+  are not silently dropped by the server/network during long-running work.
+- **Disable the per-session idle timeout** — every pooled connection runs
+  `SET idle_session_timeout = 0`, so the server no longer terminates a connection
+  that sits briefly idle between finalise phases.
+- **Transient-error retry** in the `query`/`withTx` DB helpers (3 attempts with
+  backoff) and in batch `startFinalise` (4 attempts with backoff), so a dropped
+  connection is transparently re-established instead of failing the batch.
+- **Idempotent re-finalise** — a re-run resets the verification page count to zero
+  before re-rendering and clears any stale `PARENT_NOT_FOUND` failures before
+  re-linking document families, so re-finalising a batch no longer double-counts
+  pages or leaves stale family-link failures.
+
+No schema or migration changes; no application feature changes.
+
 ## v1.4.1 — 2026-11-19
 
 Packaging-only fix release. Meridian Edge remains a **view-only** ESI review
