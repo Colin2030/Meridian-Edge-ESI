@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { config } from '../config';
-import { query, withTx } from '../db';
+import { query, withTx, isTransientConnError } from '../db';
 import * as blobStore from './blobStore';
 import { audit } from './audit';
 
@@ -227,6 +227,10 @@ export async function finaliseBatch(batchId: string): Promise<void> {
 
   // --- rendering phase: render each item's supplied review image to page PNGs ---
   counts.phases.rendering.state = 'running';
+  // Re-run safety: a transient-failure retry re-renders every item, and page
+  // inserts upsert by (document_id, page_no), so recompute the page total from
+  // zero rather than double-counting the += below on a second pass.
+  counts.verification.pages = 0;
   await writeCounts(batchId, counts);
   const pagesRoot = path.join(config.uploadsDir, `case-${caseId}`, 'rendered', `batch-${batchId}`);
   const { rows: imgDocs } = await query<{ id: number; control_number: string; image_sha256: string; image_format: 'pdf' | 'tiff' }>(
@@ -265,6 +269,10 @@ export async function finaliseBatch(batchId: string): Promise<void> {
 
   // --- linking phase: resolve explicit parent links (families) ---------------
   counts.phases.linking.state = 'running';
+  // Re-run safety: drop any PARENT_NOT_FOUND rows/entries from a previous finalise
+  // pass so the links recompute cleanly. Item-ingestion failures are untouched.
+  await query(`DELETE FROM import_failures WHERE batch_id=$1 AND code=$2`, [batchId, ERROR_CODES.PARENT_NOT_FOUND]);
+  counts.verification.failures = counts.verification.failures.filter((f) => f.code !== ERROR_CODES.PARENT_NOT_FOUND);
   await writeCounts(batchId, counts);
   const { rows: children } = await query<{ control_number: string; parent_control_number: string }>(
     `SELECT d.control_number, d.parent_control_number
@@ -325,19 +333,35 @@ export async function finaliseBatch(batchId: string): Promise<void> {
   log(`finalised ${batchId}: ${endState} (${counts.verification.items_received} items, ${counts.verification.pages} pages)`);
 }
 
-/** Kick off finalisation asynchronously; errors mark the batch failed. */
+/** Kick off finalisation asynchronously; errors mark the batch failed.
+ * A dropped connection during the long synchronous render window is transient —
+ * finalise is idempotent and re-runs cleanly from 'committing', so retry a few
+ * times before giving up. query()/withTx() already retry individual statements;
+ * this is the belt-and-braces outer loop for an error that escapes finalise. */
 export function startFinalise(batchId: string): void {
-  setImmediate(() => {
-    finaliseBatch(batchId).catch(async (e: any) => {
-      const msg = (e?.message || String(e)).slice(0, 500);
-      log(`finalise error for ${batchId}: ${msg}`);
+  const MAX_ATTEMPTS = 4;
+  setImmediate(async () => {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        const counts = (await readCounts(batchId)) || initialCounts({});
-        counts.verification.failures.push({ controlNumber: null, code: 'finalise_error', reason: msg });
-        await query(`UPDATE batches SET status='failed', end_state='failed', counts=$2, updated_at=now() WHERE id=$1`,
-          [batchId, JSON.stringify(counts)]);
-      } catch { /* best effort */ }
-    });
+        await finaliseBatch(batchId);
+        return;
+      } catch (e: any) {
+        if (isTransientConnError(e) && attempt < MAX_ATTEMPTS) {
+          log(`finalise transient error for ${batchId} (attempt ${attempt}/${MAX_ATTEMPTS}), retrying: ${(e?.message || e)}`);
+          await new Promise((r) => setTimeout(r, 2000 * attempt));
+          continue;
+        }
+        const msg = (e?.message || String(e)).slice(0, 500);
+        log(`finalise error for ${batchId}: ${msg}`);
+        try {
+          const counts = (await readCounts(batchId)) || initialCounts({});
+          counts.verification.failures.push({ controlNumber: null, code: 'finalise_error', reason: msg });
+          await query(`UPDATE batches SET status='failed', end_state='failed', counts=$2, updated_at=now() WHERE id=$1`,
+            [batchId, JSON.stringify(counts)]);
+        } catch { /* best effort */ }
+        return;
+      }
+    }
   });
 }
 
