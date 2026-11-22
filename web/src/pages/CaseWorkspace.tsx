@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDate, reviewMeta, REVIEW_STATES } from '../lib/format';
 import { displayName, displayType, displayDate, displaySubject, displayFrom, displayTo } from '../lib/displayFields';
-import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks, ClipboardList, BookMarked, FolderPlus, CheckCircle2, MessagesSquare } from 'lucide-react';
+import { Search, Bookmark, Filter, X, FileText, FileType2, Tag as TagIcon, ChevronLeft, ChevronRight, Settings2, UploadCloud, ListChecks, ClipboardList, BookMarked, FolderPlus, CheckCircle2, MessagesSquare, Star, Trash2 } from 'lucide-react';
 import { CaseAdminPanel } from '../components/CaseAdminPanel';
 import { KeywordListPanel, KwOptions } from '../components/KeywordListPanel';
 import { ReportBuilder } from '../components/ReportBuilder';
@@ -13,7 +13,8 @@ interface Tag { id: number; name: string; colour: string; }
 interface CaseInfo { id: number; name: string; case_number: string; description: string; role: string; tags: Tag[]; statusCounts: { status: string; n: number }[]; }
 interface Snippet { before: string; match: string; after: string; }
 interface DocRow {
-  id: number; control_number: string; native_type: string; page_count: number; has_text: boolean;
+  id: number; control_number: string; native_type: string;
+  native_mime?: string | null; native_filename?: string | null; page_count: number; has_text: boolean;
   metadata: Record<string, string>; review_status: string; bookmarked: boolean; tags: Tag[];
   thread_id: string | null; thread_subject: string | null; thread_count: number;
   snippet?: Snippet | null;
@@ -25,36 +26,57 @@ export default function CaseWorkspace() {
   const [docs, setDocs] = useState<DocRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [searchParams] = useSearchParams();
+  // The URL query string is the single source of truth for the search / filter
+  // state. Initialising from it (and writing it back below) means navigating
+  // list → document → back restores the exact same filtered result set, and the
+  // viewer can read the same params to walk the same ordered set. See the URL
+  // sync effect further down.
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showAdmin, setShowAdmin] = useState(searchParams.get('settings') === '1');
   const [showReport, setShowReport] = useState(false);
 
   // search mode: 'fulltext' (default, tsvector) or 'pattern' (GREP/regex)
-  const [mode, setMode] = useState<'fulltext' | 'pattern'>('fulltext');
-  const [literal, setLiteral] = useState(true);
-  const [caseSensitive, setCaseSensitive] = useState(false);
-  const [wholeWord, setWholeWord] = useState(false);
+  const [mode, setMode] = useState<'fulltext' | 'pattern'>(searchParams.get('mode') === 'pattern' ? 'pattern' : 'fulltext');
+  const [literal, setLiteral] = useState(searchParams.get('literal') !== 'false');
+  const [caseSensitive, setCaseSensitive] = useState(searchParams.get('caseSensitive') === 'true');
+  const [wholeWord, setWholeWord] = useState(searchParams.get('wholeWord') === 'true');
   const [showKeywords, setShowKeywords] = useState(false);
   const [searchError, setSearchError] = useState('');
 
-  // filters — initialise status/tag from the URL so ECA home links can
-  // pre-filter the review list (e.g. /cases/1/review?status=responsive).
-  const [q, setQ] = useState('');
+  // filters — all initialised from the URL so ECA home links can pre-filter the
+  // review list (e.g. /cases/1/review?status=responsive) AND so returning from a
+  // document restores the active search term and filters.
+  const [q, setQ] = useState(searchParams.get('q') || '');
   const [status, setStatus] = useState(searchParams.get('status') || '');
   const [tagId, setTagId] = useState(searchParams.get('tagId') || '');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const [bookmarked, setBookmarked] = useState(false);
+  const [dateFrom, setDateFrom] = useState(searchParams.get('dateFrom') || '');
+  const [dateTo, setDateTo] = useState(searchParams.get('dateTo') || '');
+  const [bookmarked, setBookmarked] = useState(searchParams.get('bookmarked') === 'true');
   // file-type filter: the selected set of extensions, plus the list of types
   // present in the case (with counts) sourced from the existing ECA endpoint.
-  const [fileTypes, setFileTypes] = useState<Set<string>>(new Set());
+  const [fileTypes, setFileTypes] = useState<Set<string>>(
+    new Set((searchParams.get('fileTypes') || '').split(',').map((s) => s.trim()).filter(Boolean))
+  );
   const [fileTypeOptions, setFileTypeOptions] = useState<{ file_type: string; count: number }[]>([]);
   const [ftOpen, setFtOpen] = useState(false);
   const ftRef = useRef<HTMLDivElement>(null);
-  const [sort, setSort] = useState('control_number');
-  const [dir, setDir] = useState<'asc' | 'desc'>('asc');
-  const [page, setPage] = useState(0);
+  // 'rank' is a server-side relevance ordering, not a column header, so never
+  // seed the UI column with it — buildParams re-derives rank for full-text+query.
+  const [sort, setSort] = useState(() => {
+    const s = searchParams.get('sort');
+    return s && s !== 'rank' ? s : 'control_number';
+  });
+  const [dir, setDir] = useState<'asc' | 'desc'>(searchParams.get('dir') === 'desc' ? 'desc' : 'asc');
+  const [page, setPage] = useState(parseInt(searchParams.get('page') || '0', 10) || 0);
   const limit = 25;
+
+  // saved searches (per-user, per-case)
+  interface SavedSearch { id: number; name: string; payload: Record<string, any>; created_at: string; }
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [showSaved, setShowSaved] = useState(false);
+  const [saveName, setSaveName] = useState('');
+  const [savingSearch, setSavingSearch] = useState(false);
+  const savedRef = useRef<HTMLDivElement>(null);
 
   // selection + binders
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -106,6 +128,94 @@ export default function CaseWorkspace() {
     if (extra) for (const [k, v] of Object.entries(extra)) p.set(k, v);
     return p;
   }, [q, status, tagId, dateFrom, dateTo, bookmarked, fileTypes, sort, dir, page, mode, literal, caseSensitive, wholeWord]);
+
+  // The URL/navigation representation of the current search + filter state:
+  // same as buildParams but without limit/offset (those are pagination-internal)
+  // and carrying the page number explicitly. This is written to the URL and
+  // appended to every document link so the viewer (and back-navigation) share
+  // the exact same single source of truth.
+  const navParams = useCallback(() => {
+    const p = buildParams();
+    p.delete('limit');
+    p.delete('offset');
+    if (page > 0) p.set('page', String(page));
+    return p;
+  }, [buildParams, page]);
+
+  const docLink = useCallback((id: number) => {
+    const s = navParams().toString();
+    return `/cases/${caseId}/documents/${id}${s ? `?${s}` : ''}`;
+  }, [navParams, caseId]);
+
+  // Mirror the live search/filter state into the URL (replace, so it doesn't
+  // flood browser history). Preserve the `settings` panel flag if open.
+  useEffect(() => {
+    const p = navParams();
+    if (showAdmin) p.set('settings', '1');
+    setSearchParams(p, { replace: true });
+  }, [navParams, showAdmin, setSearchParams]);
+
+  // ---- saved searches ------------------------------------------------------
+  const loadSavedSearches = useCallback(() => {
+    api.get<{ savedSearches: SavedSearch[] }>(`/api/cases/${caseId}/saved-searches`)
+      .then((r) => setSavedSearches(r.savedSearches || []))
+      .catch(() => setSavedSearches([]));
+  }, [caseId]);
+  useEffect(() => { loadSavedSearches(); }, [loadSavedSearches]);
+
+  // Capture the current search + filter state as a serialisable payload.
+  const currentPayload = useCallback(() => ({
+    q, mode, literal, caseSensitive, wholeWord,
+    status, tagId, dateFrom, dateTo, bookmarked,
+    fileTypes: Array.from(fileTypes), sort, dir,
+  }), [q, mode, literal, caseSensitive, wholeWord, status, tagId, dateFrom, dateTo, bookmarked, fileTypes, sort, dir]);
+
+  // Re-run a saved search: restore every filter field, reset to page 0.
+  const applySavedSearch = (payload: Record<string, any>) => {
+    setMode(payload.mode === 'pattern' ? 'pattern' : 'fulltext');
+    setLiteral(payload.literal !== false);
+    setCaseSensitive(payload.caseSensitive === true);
+    setWholeWord(payload.wholeWord === true);
+    setQ(payload.q || '');
+    setStatus(payload.status || '');
+    setTagId(payload.tagId || '');
+    setDateFrom(payload.dateFrom || '');
+    setDateTo(payload.dateTo || '');
+    setBookmarked(payload.bookmarked === true);
+    setFileTypes(new Set(Array.isArray(payload.fileTypes) ? payload.fileTypes : []));
+    setSort(payload.sort && payload.sort !== 'rank' ? payload.sort : 'control_number');
+    setDir(payload.dir === 'desc' ? 'desc' : 'asc');
+    setPage(0);
+    setShowSaved(false);
+  };
+
+  const saveCurrentSearch = async () => {
+    const name = saveName.trim();
+    if (!name) return;
+    setSavingSearch(true);
+    try {
+      await api.post(`/api/cases/${caseId}/saved-searches`, { name, payload: currentPayload() });
+      setSaveName('');
+      loadSavedSearches();
+    } finally {
+      setSavingSearch(false);
+    }
+  };
+
+  const deleteSavedSearch = async (id: number) => {
+    await api.del(`/api/cases/${caseId}/saved-searches/${id}`);
+    setSavedSearches((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  // Close the saved-searches popover on outside click / Escape.
+  useEffect(() => {
+    if (!showSaved) return;
+    const onDown = (e: MouseEvent) => { if (savedRef.current && !savedRef.current.contains(e.target as Node)) setShowSaved(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowSaved(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [showSaved]);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -261,6 +371,50 @@ export default function CaseWorkspace() {
             {mode === 'fulltext' ? 'Natural-language search across indexed text.' : 'Match exact text or patterns in the extracted text.'}
           </span>
           <div className="flex-1" />
+          {/* Saved searches — save the current search/filter state and re-run it later */}
+          <div className="relative" ref={savedRef}>
+            <button type="button" onClick={() => setShowSaved((s) => !s)}
+              aria-haspopup="true" aria-expanded={showSaved}
+              className={`btn-outline ${showSaved ? 'border-accent text-accent-dark bg-accent/5' : ''}`}>
+              <Star size={15} /> Saved searches
+              {savedSearches.length > 0 && <span className="ml-1 rounded-full bg-slate-200 px-1.5 text-xs font-semibold text-slate-600">{savedSearches.length}</span>}
+            </button>
+            {showSaved && (
+              <div role="menu" className="absolute right-0 z-40 mt-1 w-80 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+                <div className="mb-2">
+                  <label className="label">Save current search</label>
+                  <div className="flex gap-2">
+                    <input className="input" placeholder="Name this search…" value={saveName}
+                      maxLength={120}
+                      onChange={(e) => setSaveName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') saveCurrentSearch(); }} />
+                    <button onClick={saveCurrentSearch} disabled={!saveName.trim() || savingSearch} className="btn-primary whitespace-nowrap">
+                      <Star size={14} /> Save
+                    </button>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">Saves your current query, mode and filters, just for you.</p>
+                </div>
+                <div className="border-t border-slate-100 pt-2">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Your saved searches</span>
+                  <div className="mt-1 max-h-64 overflow-auto">
+                    {savedSearches.length === 0 ? (
+                      <p className="px-1 py-2 text-xs text-slate-400">No saved searches yet.</p>
+                    ) : savedSearches.map((ss) => (
+                      <div key={ss.id} className="group flex items-center gap-2 rounded px-1.5 py-1.5 hover:bg-slate-50">
+                        <button onClick={() => applySavedSearch(ss.payload)} className="flex-1 min-w-0 text-left" title="Apply this search">
+                          <span className="block truncate text-sm text-slate-700">{ss.name}</span>
+                          {ss.payload?.q && <span className="block truncate text-xs text-slate-400 font-mono">{ss.payload.q}</span>}
+                        </button>
+                        <button onClick={() => deleteSavedSearch(ss.id)} className="shrink-0 text-slate-300 hover:text-rose-500" title="Delete saved search">
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
           <button onClick={() => setShowKeywords((s) => !s)} className={`btn-outline ${showKeywords ? 'border-accent text-accent-dark bg-accent/5' : ''}`}>
             <ListChecks size={15} /> Keyword list
           </button>
@@ -390,7 +544,7 @@ export default function CaseWorkspace() {
               const toVal = displayTo(m);
               const subjVal = displaySubject(m);
               const nameVal = displayName(m, d.control_number);
-              const typeVal = displayType(m, d.native_type);
+              const typeVal = displayType(m, d.native_type, d.native_mime, d.native_filename);
               const rm = reviewMeta(d.review_status);
               const snip = mode === 'pattern' ? d.snippet : null;
               return (
@@ -408,7 +562,7 @@ export default function CaseWorkspace() {
                     </button>
                   </td>
                   <td className="px-3 py-2.5">
-                    <Link to={`/cases/${caseId}/documents/${d.id}`} className="font-medium text-navy-900 hover:text-accent-dark">{nameVal}</Link>
+                    <Link to={docLink(d.id)} className="font-medium text-navy-900 hover:text-accent-dark">{nameVal}</Link>
                     {nameVal !== d.control_number && <div className="text-xs text-slate-400 truncate max-w-[220px]" title={d.control_number}>{d.control_number}</div>}
                   </td>
                   <td className="px-3 py-2.5 text-slate-500 whitespace-nowrap">{fmtDate(dateVal)}</td>
@@ -446,7 +600,7 @@ export default function CaseWorkspace() {
                     {canBinder && <td></td>}
                     <td></td>
                     <td colSpan={8} className="px-3 pb-2.5 pt-0 text-xs text-slate-500">
-                      <Link to={`/cases/${caseId}/documents/${d.id}`} className="hover:text-accent-dark">
+                      <Link to={docLink(d.id)} className="hover:text-accent-dark">
                         <span className="font-mono">{snip.before}</span>
                         {snip.match && <mark className="bg-amber-200 text-navy-900 rounded px-0.5 font-mono">{snip.match}</mark>}
                         <span className="font-mono">{snip.after}</span>

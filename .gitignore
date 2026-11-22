@@ -10,3 +10,4 @@ npm-debug.log*
 sample-data/
 *.exit
 .env.dev
+screenshots/

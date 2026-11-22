@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { fmtDateTime, reviewMeta, REVIEW_STATES } from '../lib/format';
 import { displayName, displayType, displaySubject } from '../lib/displayFields';
@@ -40,6 +40,22 @@ interface Family {
 export default function DocumentViewer() {
   const { caseId, docId } = useParams();
   const nav = useNavigate();
+  // The list's active search/filter state is carried in the URL query string so
+  // prev/next walk the SAME ordered result set the list showed, and "Back to
+  // list" restores that exact filtered list. See CaseWorkspace navParams/docLink.
+  const [sp] = useSearchParams();
+  const listSearch = sp.toString();
+  const backTo = `/cases/${caseId}/review${listSearch ? `?${listSearch}` : ''}`;
+  // Params for the ordered-ids endpoint: the same filters, minus the list's page
+  // (we want ALL matching ids, not one page).
+  const idsQuery = useMemo(() => {
+    const p = new URLSearchParams(sp);
+    p.delete('page');
+    return p.toString();
+  }, [sp]);
+  // Append the list state to a sibling-document link so navigating within the
+  // viewer keeps the result set and back-navigation stays filtered.
+  const withList = useCallback((path: string) => `${path}${listSearch ? `?${listSearch}` : ''}`, [listSearch]);
   const [doc, setDoc] = useState<DocDetail | null>(null);
   const [caseTags, setCaseTags] = useState<Tag[]>([]);
   const [docIds, setDocIds] = useState<number[]>([]);
@@ -87,15 +103,21 @@ export default function DocumentViewer() {
   }, [caseId, docId]);
   useEffect(() => {
     api.get<any>(`/api/cases/${caseId}`).then((c) => setCaseTags(c.tags || []));
-    api.get<{ documents: { id: number }[] }>(`/api/case/${caseId}/documents?limit=200&sort=control_number`)
-      .then((r) => setDocIds(r.documents.map((x) => x.id)));
   }, [caseId]);
+  // Fetch the ordered id list for the CURRENT search/filter so prev/next walk the
+  // exact result set the user was viewing. With no filter params this returns the
+  // whole case ordered by control number (default navigation).
+  useEffect(() => {
+    api.get<{ ids: number[] }>(`/api/case/${caseId}/documents/ids${idsQuery ? `?${idsQuery}` : ''}`)
+      .then((r) => setDocIds(r.ids || []))
+      .catch(() => setDocIds([]));
+  }, [caseId, idsQuery]);
 
   const canReview = doc && (doc.role === 'system_admin' || doc.role === 'case_manager' || doc.role === 'reviewer');
 
   const idx = useMemo(() => docIds.indexOf(Number(docId)), [docIds, docId]);
-  const goPrev = useCallback(() => { if (idx > 0) nav(`/cases/${caseId}/documents/${docIds[idx - 1]}`); }, [idx, docIds, caseId, nav]);
-  const goNext = useCallback(() => { if (idx >= 0 && idx < docIds.length - 1) nav(`/cases/${caseId}/documents/${docIds[idx + 1]}`); }, [idx, docIds, caseId, nav]);
+  const goPrev = useCallback(() => { if (idx > 0) nav(withList(`/cases/${caseId}/documents/${docIds[idx - 1]}`)); }, [idx, docIds, caseId, nav, withList]);
+  const goNext = useCallback(() => { if (idx >= 0 && idx < docIds.length - 1) nav(withList(`/cases/${caseId}/documents/${docIds[idx + 1]}`)); }, [idx, docIds, caseId, nav, withList]);
 
   // keyboard navigation
   useEffect(() => {
@@ -140,7 +162,7 @@ export default function DocumentViewer() {
     setBusy(true);
     try {
       await api.del(`/api/cases/${caseId}/documents/${doc.id}`);
-      nav(`/cases/${caseId}/review`, { state: { flash: `Document ${doc.controlNumber} deleted. It can be restored within 7 days.` } });
+      nav(backTo, { state: { flash: `Document ${doc.controlNumber} deleted. It can be restored within 7 days.` } });
     } catch { setBusy(false); setConfirmDelete(false); }
   };
 
@@ -164,12 +186,12 @@ export default function DocumentViewer() {
       {/* top bar */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
-          <Link to={`/cases/${caseId}/review`} className="btn-ghost text-slate-500"><ChevronLeft size={16} /> Back to list</Link>
+          <Link to={backTo} className="btn-ghost text-slate-500"><ChevronLeft size={16} /> Back to list</Link>
           <div>
             <div className="flex items-center gap-2">
               {isPdf ? <FileType2 size={18} className="text-rose-500" /> : <FileText size={18} className="text-sky-600" />}
               <h1 className="text-lg font-bold text-navy-900">{displayName(m, doc.controlNumber)}</h1>
-              <span className="badge bg-slate-100 text-slate-600">{displayType(m, doc.nativeType)}</span>
+              <span className="badge bg-slate-100 text-slate-600">{displayType(m, doc.nativeType, doc.nativeMime, doc.nativeFilename)}</span>
               <span className={`badge ${rm.cls}`}>{rm.label}</span>
             </div>
             <div className="text-xs text-slate-400">{displaySubject(m) || (displayName(m, doc.controlNumber) !== doc.controlNumber ? doc.controlNumber : '')}</div>
@@ -309,7 +331,7 @@ export default function DocumentViewer() {
                   return (
                     <li key={msg.id}>
                       <Link
-                        to={`/cases/${caseId}/documents/${msg.id}`}
+                        to={withList(`/cases/${caseId}/documents/${msg.id}`)}
                         className={`flex items-start gap-2 rounded-md px-2 py-1.5 text-sm transition ${msg.current ? 'bg-accent/[0.08] ring-1 ring-accent/30' : 'hover:bg-slate-50'}`}
                         title={msg.current ? 'Current message' : `Open ${msg.controlNumber}`}
                       >
@@ -353,7 +375,7 @@ export default function DocumentViewer() {
                 </div>
               )}
               {family.parent && (
-                <Link to={`/cases/${caseId}/documents/${family.parent.id}`}
+                <Link to={withList(`/cases/${caseId}/documents/${family.parent.id}`)}
                   className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition ${family.parent.controlNumber === family.controlNumber ? 'bg-accent/[0.08] ring-1 ring-accent/30' : 'hover:bg-slate-50'}`}>
                   <MessageSquare size={13} className="text-slate-400" />
                   <span className="min-w-0 flex-1 truncate">Parent · {family.parent.controlNumber}</span>
@@ -363,7 +385,7 @@ export default function DocumentViewer() {
               <ol className="space-y-0.5 mt-0.5 max-h-[28vh] overflow-auto">
                 {family.attachments.map((a) => (
                   <li key={a.id}>
-                    <Link to={`/cases/${caseId}/documents/${a.id}`}
+                    <Link to={withList(`/cases/${caseId}/documents/${a.id}`)}
                       className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition ${a.current ? 'bg-accent/[0.08] ring-1 ring-accent/30' : 'hover:bg-slate-50'}`}>
                       <CornerDownRight size={13} className="text-slate-300" />
                       <span className="min-w-0 flex-1 truncate">{a.nativeFilename || a.controlNumber}</span>

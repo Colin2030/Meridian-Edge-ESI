@@ -9,16 +9,22 @@
 //      e.g. preferred_supplier.eml -> 'eml'.
 //   2. Friendly FILETYPE/MIME label, e.g. message/rfc822 -> 'Email'.
 //   3. Raw FILETYPE value if unmapped.
-//   4. native_type (e.g. 'tiff').
-//   5. 'Unknown'.
+//   (1-3 win for loadfile docs; 4-6 below supply the real native type for
+//    batch-ingested docs, which carry no DOCTYPE/FILETYPE metadata.)
+//   4. Extension from native_filename (e.g. 'Re: thought.eml' -> 'eml').
+//   5. Friendly native_mime label (e.g. message/rfc822 -> 'Email').
+//   6. Raw native_mime value if unmapped.
+//   7. native_type viewer render kind (e.g. 'tiff') — last resort.
+//   8. 'Unknown'.
 //
 // For email corpora with no filename extension this yields the meaningful bucket
 // 'Email' (from the MIME type) instead of lumping everything into 'Unknown'.
 //
-// metaCol / nativeCol are the SQL references to the documents columns (e.g.
-// 'metadata'/'native_type' or 'd.metadata'/'d.native_type' when aliased).
+// metaCol / nativeCol / nativeMimeCol / nativeFilenameCol are the SQL references
+// to the documents columns (e.g. 'metadata'/'native_type'/'native_mime'/
+// 'native_filename' or 'd.metadata'/... when aliased).
 
-import { friendlyMimeSql } from './displayFields';
+import { friendlyMimeSql, extFromNameSql } from './displayFields';
 
 // Extract the lowercased extension from the first non-empty filename variant,
 // stripping any extracted-row child suffix (name.csv_row_N -> name.csv). The
@@ -26,15 +32,25 @@ import { friendlyMimeSql } from './displayFields';
 // dotfiles (.gitignore) yield NULL rather than a spurious extension.
 export function fileTypeExtSql(metaCol = 'metadata'): string {
   const name = `COALESCE(NULLIF(${metaCol}->>'File Name',''), NULLIF(${metaCol}->>'FILENAME',''))`;
-  return `lower(substring(regexp_replace(${name}, '_row_[0-9]+$', '', 'i') from '[^.]\\.([A-Za-z0-9]+)$'))`;
+  return extFromNameSql(name);
 }
 
-export function fileTypeBucketSql(metaCol = 'metadata', nativeCol = 'native_type'): string {
+export function fileTypeBucketSql(
+  metaCol = 'metadata',
+  nativeCol = 'native_type',
+  nativeMimeCol = 'native_mime',
+  nativeFilenameCol = 'native_filename',
+): string {
   const mime = `NULLIF(${metaCol}->>'FILETYPE','')`;
+  const nativeMime = `NULLIF(${nativeMimeCol},'')`;
+  const nativeName = `NULLIF(${nativeFilenameCol},'')`;
   return `COALESCE(
     ${fileTypeExtSql(metaCol)},
     ${friendlyMimeSql(mime)},
     ${mime},
+    ${extFromNameSql(nativeName)},
+    ${friendlyMimeSql(nativeMime)},
+    ${nativeMime},
     NULLIF(${nativeCol},''),
     'Unknown')`;
 }

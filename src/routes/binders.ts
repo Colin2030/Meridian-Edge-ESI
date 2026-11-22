@@ -122,7 +122,7 @@ router.get('/:caseId/binders/:binderId', requireAuth, requireCaseRole('read_only
   )).rows[0].total;
 
   const { rows: documents } = await query<any>(
-    `SELECT d.id, d.control_number, d.native_type, d.page_count, d.has_text, d.created_at,
+    `SELECT d.id, d.control_number, d.native_type, d.native_mime, d.native_filename, d.page_count, d.has_text, d.created_at,
             d.metadata, rs.status AS review_status, bd.added_at,
             EXISTS (SELECT 1 FROM bookmarks b WHERE b.document_id=d.id AND b.user_id=$2) AS bookmarked,
             COALESCE((SELECT json_agg(json_build_object('id',t.id,'name',t.name,'colour',t.colour))

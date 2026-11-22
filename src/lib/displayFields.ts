@@ -40,6 +40,18 @@ export function friendlyMimeSql(mimeExpr: string): string {
     ELSE NULL END`;
 }
 
+/**
+ * SQL expression extracting the lowercased file extension from a filename SQL
+ * expression, stripping any extracted-row child suffix (name.csv_row_N -> name.csv).
+ * The [^.] guard requires a non-dot character before the final dot so leading-dot
+ * dotfiles (.gitignore) yield NULL rather than a spurious extension. `nameExpr`
+ * must already be an SQL expression (commonly a NULLIF(... ,'') wrapper). Shared by
+ * fileType.ts (fileTypeExtSql / fileTypeBucketSql) and displayTypeSql below.
+ */
+export function extFromNameSql(nameExpr: string): string {
+  return `lower(substring(regexp_replace(${nameExpr}, '_row_[0-9]+$', '', 'i') from '[^.]\\.([A-Za-z0-9]+)$'))`;
+}
+
 /** Display NAME: first non-empty filename/subject/title variant, else control number. */
 export function displayNameSql(metaCol = 'metadata', controlCol = 'control_number'): string {
   return `COALESCE(
@@ -51,13 +63,30 @@ export function displayNameSql(metaCol = 'metadata', controlCol = 'control_numbe
     ${controlCol})`;
 }
 
-/** Display TYPE (friendly): DOCTYPE, then friendly FILETYPE label, then raw FILETYPE, then native_type, else 'Unknown'. */
-export function displayTypeSql(metaCol = 'metadata', nativeCol = 'native_type'): string {
+// Display TYPE (friendly). Precedence: metadata DOCTYPE, then friendly FILETYPE
+// label, then raw FILETYPE (these win for loadfile docs), THEN the real native
+// file type for batch-ingested docs — extension from native_filename, friendly
+// native_mime label, raw native_mime — and finally the viewer render kind
+// (native_type) as a last-resort fallback, else 'Unknown'. The native clauses sit
+// ABOVE native_type so batch docs (which carry no DOCTYPE/FILETYPE metadata but do
+// carry native_mime/native_filename) show e.g. 'Email'/'eml' instead of the render
+// kind 'pdf'. Kept in sync with fileTypeBucketSql in fileType.ts.
+export function displayTypeSql(
+  metaCol = 'metadata',
+  nativeCol = 'native_type',
+  nativeMimeCol = 'native_mime',
+  nativeFilenameCol = 'native_filename',
+): string {
   const mime = `NULLIF(${metaCol}->>'FILETYPE','')`;
+  const nativeMime = `NULLIF(${nativeMimeCol},'')`;
+  const nativeName = `NULLIF(${nativeFilenameCol},'')`;
   return `COALESCE(
     NULLIF(${metaCol}->>'DOCTYPE',''),
     ${friendlyMimeSql(mime)},
     ${mime},
+    ${extFromNameSql(nativeName)},
+    ${friendlyMimeSql(nativeMime)},
+    ${nativeMime},
     NULLIF(${nativeCol},''),
     'Unknown')`;
 }

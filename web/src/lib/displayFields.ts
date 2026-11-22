@@ -41,6 +41,17 @@ function friendlyMime(mimeRaw?: string): string | undefined {
   return undefined;
 }
 
+// Extract the lowercased file extension from a filename, stripping any
+// extracted-row child suffix (name.csv_row_N -> name.csv). The leading
+// non-dot guard means leading-dot dotfiles (.gitignore) yield undefined
+// rather than a spurious extension. Mirrors extFromNameSql in the backend.
+function extFromName(name?: string): string | undefined {
+  if (!name) return undefined;
+  const base = name.replace(/_row_[0-9]+$/i, '');
+  const m = base.match(/[^.]\.([A-Za-z0-9]+)$/);
+  return m ? m[1].toLowerCase() : undefined;
+}
+
 /** Display NAME: filename/subject/title variant, else control number. */
 export function displayName(m: Meta, controlNumber: string): string {
   return firstNonEmpty(m, ['File Name', 'FILENAME', 'SUBJECT', 'Email Subject', 'Title']) || controlNumber;
@@ -51,13 +62,27 @@ export function hasFileName(m: Meta): boolean {
   return !!firstNonEmpty(m, ['File Name', 'FILENAME']);
 }
 
-/** Display TYPE (friendly): DOCTYPE, friendly FILETYPE label, raw FILETYPE, native_type, else 'Unknown'. */
-export function displayType(m: Meta, nativeType?: string | null): string {
+// Display TYPE (friendly). Precedence: metadata DOCTYPE, friendly FILETYPE label,
+// raw FILETYPE (these win for loadfile docs), THEN the real native file type for
+// batch-ingested docs — extension from native_filename, friendly native_mime
+// label, raw native_mime — and finally the viewer render kind (native_type) as a
+// last-resort fallback, else 'Unknown'. Mirrors displayTypeSql in the backend.
+export function displayType(
+  m: Meta,
+  nativeType?: string | null,
+  nativeMime?: string | null,
+  nativeFilename?: string | null,
+): string {
   const mime = firstNonEmpty(m, ['FILETYPE']);
+  const nMime = nativeMime && String(nativeMime).trim() ? String(nativeMime) : undefined;
+  const nName = nativeFilename && String(nativeFilename).trim() ? String(nativeFilename) : undefined;
   return (
     firstNonEmpty(m, ['DOCTYPE']) ||
     friendlyMime(mime) ||
     mime ||
+    extFromName(nName) ||
+    friendlyMime(nMime) ||
+    nMime ||
     (nativeType && String(nativeType).trim() ? String(nativeType) : undefined) ||
     'Unknown'
   );

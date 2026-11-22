@@ -27,7 +27,18 @@ const keywordUpload = multer({ storage: multer.memoryStorage(), limits: { fileSi
 // Search / list documents within a case (read_only+)
 // Exported so the token-auth /api/v1 route can reuse the exact same listing,
 // search, filtering and pagination logic.
-export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
+// Shared builder for the document list/search WHERE clause, ordering and rank
+// select. Reused by the paged list handler AND the lightweight ids handler so
+// the viewer's prev/next navigation walks the EXACT same ordered result set the
+// list shows (single source of truth). Returns `{ invalid }` for a bad regex so
+// callers can respond 400; otherwise returns the SQL fragments + bound params.
+async function buildDocumentFilter(req: AuthedRequest): Promise<{
+  invalid?: string;
+  caseId: number; u: NonNullable<AuthedRequest['user']>;
+  q: string; mode: 'fulltext' | 'pattern'; patternOpts: ReturnType<typeof parsePatternOptions>;
+  usePattern: boolean; where: string[]; params: any[]; bmParam: number;
+  rankSelect: string; orderBy: string;
+}> {
   const caseId = (req as any).caseId;
   const u = req.user!;
   const q = (req.query.q as string || '').trim();
@@ -50,19 +61,16 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
   ));
   const sort = (req.query.sort as string) || 'control_number';
   const dir = ((req.query.dir as string) || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
-  const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-  const offset = parseInt(req.query.offset as string) || 0;
 
   const where: string[] = ['d.case_id = $1', 'd.deleted_at IS NULL'];
   const params: any[] = [caseId];
   let rankSelect = '0 AS rank';
   const usePattern = mode === 'pattern' && !!q;
-  let pattern = '';
   if (usePattern) {
     // GREP / regex mode — match extracted_text with a POSIX regex.
-    pattern = buildPattern(q, patternOpts);
+    const pattern = buildPattern(q, patternOpts);
     const invalid = await validatePattern(pattern);
-    if (invalid) return res.status(400).json({ error: `Invalid pattern: ${invalid}` });
+    if (invalid) return { invalid: `Invalid pattern: ${invalid}` } as any;
     params.push(pattern);
     where.push(`d.extracted_text ${regexOperator(patternOpts.caseSensitive)} $${params.length}`);
   } else if (q) {
@@ -95,7 +103,7 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
     // set (OR/union). lower() around the bucket makes the 'Unknown' bucket match
     // the lowercased input; the extension itself is already lowercased.
     params.push(fileTypes);
-    where.push(`lower(${fileTypeBucketSql('d.metadata', 'd.native_type')}) = ANY($${params.length}::text[])`);
+    where.push(`lower(${fileTypeBucketSql('d.metadata', 'd.native_type', 'd.native_mime', 'd.native_filename')}) = ANY($${params.length}::text[])`);
   }
   params.push(u.id);
   const bmParam = params.length;
@@ -106,13 +114,22 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
   const sortCol = ['control_number', 'rank', 'created_at', 'page_count'].includes(sort) ? sort : 'control_number';
   // rank only meaningful in full-text mode; pattern mode falls back to the chosen/default column.
   const orderBy = (!usePattern && q && sort === 'rank') ? `rank DESC` : `d.${sortCol === 'rank' ? 'control_number' : sortCol} ${dir}`;
+  return { caseId, u, q, mode, patternOpts, usePattern, where, params, bmParam, rankSelect, orderBy };
+}
+
+export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
+  const built = await buildDocumentFilter(req);
+  if (built.invalid) return res.status(400).json({ error: built.invalid });
+  const { caseId, u, q, mode, patternOpts, usePattern, where, params, bmParam, rankSelect, orderBy } = built;
+  const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+  const offset = parseInt(req.query.offset as string) || 0;
 
   // Pattern mode also selects extracted_text so we can build highlight snippets.
   const extraSelect = usePattern ? ', d.extracted_text' : '';
 
   params.push(limit, offset);
   const sql = `
-    SELECT d.id, d.control_number, d.native_type, d.page_count, d.has_text, d.created_at,
+    SELECT d.id, d.control_number, d.native_type, d.native_mime, d.native_filename, d.page_count, d.has_text, d.created_at,
            d.metadata, d.thread_id, d.thread_subject, rs.status AS review_status, ${rankSelect}${extraSelect},
            CASE WHEN d.thread_id IS NULL THEN 1
                 ELSE (SELECT count(*)::int FROM documents dt WHERE dt.case_id=d.case_id AND dt.thread_id=d.thread_id)
@@ -162,6 +179,39 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
   res.json({ total, limit, offset, mode, documents: rows });
 };
 router.get('/case/:caseId/documents', requireAuth, requireCaseRole('read_only'), listDocumentsHandler);
+
+// Ordered id list for the current search/filter — powers the document viewer's
+// prev/next navigation so it walks the EXACT same ordered result set the list
+// shows (not the whole case, not nothing). Lightweight: returns ids only.
+// Capped so even an unfiltered walk of a large case stays bounded.
+const IDS_CAP = 20000;
+router.get('/case/:caseId/documents/ids', requireAuth, requireCaseRole('read_only'), async (req: AuthedRequest, res) => {
+  const built = await buildDocumentFilter(req);
+  if (built.invalid) return res.status(400).json({ error: built.invalid });
+  const { usePattern, where, params, orderBy, rankSelect } = built;
+  // Select rankSelect too so an `ORDER BY rank DESC` (full-text relevance sort)
+  // resolves the alias. It is otherwise inert.
+  const idsSql = `
+    SELECT d.id, ${rankSelect}
+    FROM documents d
+    LEFT JOIN review_states rs ON rs.document_id=d.id
+    WHERE ${where.join(' AND ')}
+    ORDER BY ${orderBy}
+    LIMIT ${IDS_CAP}`;
+  // Pass only the params actually referenced (u.id may be unused when the
+  // bookmark filter is off) — Postgres rejects extra trailing parameters.
+  const maxParam = Math.max(0, ...(idsSql.match(/\$(\d+)/g) || []).map((s) => parseInt(s.slice(1), 10)));
+  const idsParams = params.slice(0, maxParam);
+  try {
+    const rows = usePattern
+      ? (await queryWithTimeout<{ id: number }>(idsSql, idsParams, PATTERN_TIMEOUT_MS)).rows
+      : (await query<{ id: number }>(idsSql, idsParams)).rows;
+    res.json({ ids: rows.map((r) => r.id), capped: rows.length >= IDS_CAP });
+  } catch (e: any) {
+    if (e instanceof PatternError) return res.status(e.status).json({ error: e.message });
+    throw e;
+  }
+});
 
 // ---- Keyword-list batch GREP (read_only+) -----------------------------------
 // Upload a .txt of terms (one per line, # comments ignored) and grep every term

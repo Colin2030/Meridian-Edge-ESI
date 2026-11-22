@@ -94,7 +94,7 @@ router.get('/:caseId/eca', requireAuth, requireCaseRole('read_only'), async (req
   // the final extension lowercased. The [^.] guard requires a non-dot character
   // before the final dot, so leading-dot dotfiles (e.g. .gitignore) yield NULL
   // rather than a spurious extension. NULL => 'Unknown' via COALESCE below.
-  const bucketExpr = fileTypeBucketSql();
+  const bucketExpr = fileTypeBucketSql('metadata', 'native_type', 'native_mime', 'native_filename');
   const totals = (await query<any>(
     `SELECT count(*)::int AS total_documents,
             count(*) FILTER (WHERE lower(${bucketExpr}) IN ('email','eml'))::int AS email_count,

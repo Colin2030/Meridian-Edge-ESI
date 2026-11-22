@@ -7,7 +7,8 @@ import { ChevronLeft, ChevronRight, BookMarked, Link2, Check, Trash2, FileText, 
 
 interface Tag { id: number; name: string; colour: string; }
 interface DocRow {
-  id: number; control_number: string; native_type: string; page_count: number;
+  id: number; control_number: string; native_type: string;
+  native_mime?: string | null; native_filename?: string | null; page_count: number;
   metadata: Record<string, string>; review_status: string; tags: Tag[];
 }
 interface BinderMeta {
@@ -142,7 +143,7 @@ export default function BinderPage() {
                   <td className="px-3 py-2.5">
                     <span className="inline-flex items-center gap-1 text-slate-500">
                       {d.native_type === 'pdf' ? <FileType2 size={14} className="text-rose-500" /> : <FileText size={14} className="text-sky-600" />}
-                      {displayType(m, d.native_type)}
+                      {displayType(m, d.native_type, d.native_mime, d.native_filename)}
                     </span>
                   </td>
                   <td className="px-3 py-2.5 text-slate-500">{d.page_count}</td>
