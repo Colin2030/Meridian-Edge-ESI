@@ -63,10 +63,16 @@ export function hasFileName(m: Meta): boolean {
 }
 
 // Display TYPE (friendly). Precedence: metadata DOCTYPE, friendly FILETYPE label,
-// raw FILETYPE (these win for loadfile docs), THEN the real native file type for
-// batch-ingested docs — extension from native_filename, friendly native_mime
-// label, raw native_mime — and finally the viewer render kind (native_type) as a
-// last-resort fallback, else 'Unknown'. Mirrors displayTypeSql in the backend.
+// raw FILETYPE (these win for Concordance loadfile docs), THEN the EDRM-loadfile
+// metadata clauses — extension from metadata 'File Name'/'FILENAME' and the
+// friendly/raw metadata 'MIME Type' (the EDRM importer stores the real type in
+// metadata and leaves native_mime/native_filename NULL, setting native_type to the
+// render kind 'native') — THEN the real native file type for batch-ingested docs
+// (extension from native_filename, friendly native_mime label, raw native_mime),
+// and finally the viewer render kind (native_type) as a last-resort fallback, else
+// 'Unknown'. The metadata 'File Name'/'MIME Type' clauses mirror the first clauses
+// of fileTypeBucketSql, so the list type column agrees with the ECA buckets for
+// EDRM docs. Mirrors displayTypeSql in the backend — keep both in sync.
 export function displayType(
   m: Meta,
   nativeType?: string | null,
@@ -74,12 +80,18 @@ export function displayType(
   nativeFilename?: string | null,
 ): string {
   const mime = firstNonEmpty(m, ['FILETYPE']);
+  // EDRM importer key is literally 'MIME Type' (with a space), case-sensitive.
+  const metaMime = firstNonEmpty(m, ['MIME Type']);
+  const metaName = firstNonEmpty(m, ['File Name', 'FILENAME']);
   const nMime = nativeMime && String(nativeMime).trim() ? String(nativeMime) : undefined;
   const nName = nativeFilename && String(nativeFilename).trim() ? String(nativeFilename) : undefined;
   return (
     firstNonEmpty(m, ['DOCTYPE']) ||
     friendlyMime(mime) ||
     mime ||
+    extFromName(metaName) ||
+    friendlyMime(metaMime) ||
+    metaMime ||
     extFromName(nName) ||
     friendlyMime(nMime) ||
     nMime ||

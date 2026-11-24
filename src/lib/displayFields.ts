@@ -64,13 +64,17 @@ export function displayNameSql(metaCol = 'metadata', controlCol = 'control_numbe
 }
 
 // Display TYPE (friendly). Precedence: metadata DOCTYPE, then friendly FILETYPE
-// label, then raw FILETYPE (these win for loadfile docs), THEN the real native
-// file type for batch-ingested docs — extension from native_filename, friendly
-// native_mime label, raw native_mime — and finally the viewer render kind
-// (native_type) as a last-resort fallback, else 'Unknown'. The native clauses sit
-// ABOVE native_type so batch docs (which carry no DOCTYPE/FILETYPE metadata but do
-// carry native_mime/native_filename) show e.g. 'Email'/'eml' instead of the render
-// kind 'pdf'. Kept in sync with fileTypeBucketSql in fileType.ts.
+// label, then raw FILETYPE (these win for Concordance loadfile docs), THEN the
+// EDRM-loadfile metadata clauses — extension from metadata 'File Name'/'FILENAME'
+// and the friendly/raw metadata 'MIME Type' (the EDRM importer stores the real type
+// in metadata and leaves native_mime/native_filename NULL, setting native_type to
+// the render kind 'native'), THEN the real native file type for batch-ingested docs
+// — extension from native_filename, friendly native_mime label, raw native_mime —
+// and finally the viewer render kind (native_type) as a last-resort fallback, else
+// 'Unknown'. The metadata 'File Name'/'MIME Type' clauses mirror the first clauses
+// of fileTypeBucketSql in fileType.ts, so the list type column agrees with the ECA
+// buckets for EDRM docs. Kept in sync with fileTypeBucketSql in fileType.ts and the
+// frontend mirror in web/src/lib/displayFields.ts.
 export function displayTypeSql(
   metaCol = 'metadata',
   nativeCol = 'native_type',
@@ -78,12 +82,18 @@ export function displayTypeSql(
   nativeFilenameCol = 'native_filename',
 ): string {
   const mime = `NULLIF(${metaCol}->>'FILETYPE','')`;
+  // EDRM importer key is literally 'MIME Type' (with a space), case-sensitive.
+  const metaMime = `NULLIF(${metaCol}->>'MIME Type','')`;
+  const metaName = `COALESCE(NULLIF(${metaCol}->>'File Name',''), NULLIF(${metaCol}->>'FILENAME',''))`;
   const nativeMime = `NULLIF(${nativeMimeCol},'')`;
   const nativeName = `NULLIF(${nativeFilenameCol},'')`;
   return `COALESCE(
     NULLIF(${metaCol}->>'DOCTYPE',''),
     ${friendlyMimeSql(mime)},
     ${mime},
+    ${extFromNameSql(metaName)},
+    ${friendlyMimeSql(metaMime)},
+    ${metaMime},
     ${extFromNameSql(nativeName)},
     ${friendlyMimeSql(nativeMime)},
     ${nativeMime},
