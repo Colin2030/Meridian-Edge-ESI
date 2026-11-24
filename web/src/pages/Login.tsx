@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { Wordmark } from '../components/Logo';
-import { ShieldCheck, Lock } from 'lucide-react';
-// Stacked (vertical) white-on-transparent lockup — the centrepiece of the charcoal brand panel.
+import { Lock } from 'lucide-react';
+// Stacked (vertical) white-on-transparent lockup — the default centrepiece of the
+// charcoal brand panel when no custom login logo has been configured.
 import stackedLogo from '../assets/brand/meridian-logo-stacked-inverted.png';
 
 export default function Login() {
@@ -16,6 +17,19 @@ export default function Login() {
   const [password, setP] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+
+  // Admin-configurable login logo (cosmetic branding). Fetched pre-auth from the
+  // public branding endpoint; falls back to the bundled default if unset or if the
+  // request fails (e.g. offline / air-gapped first boot).
+  const [customLogoUrl, setCustomLogoUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    fetch('/api/branding', { credentials: 'same-origin' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (active && j?.loginLogo?.url) setCustomLogoUrl(j.loginLogo.url); })
+      .catch(() => { /* degrade gracefully to the bundled default */ });
+    return () => { active = false; };
+  }, []);
 
   if (user) { nav(dest, { replace: true }); }
 
@@ -36,36 +50,32 @@ export default function Login() {
         {/* top spacer to balance the footer so the centrepiece sits in the true middle */}
         <div className="relative h-6" aria-hidden="true" />
 
-        {/* Centrepiece: large stacked logo, centred, with supporting copy below */}
+        {/* Centrepiece: logo (custom or bundled default), centred, with the platform caption below */}
         <div className="relative flex flex-col items-center text-center">
           <img
-            src={stackedLogo}
+            src={customLogoUrl || stackedLogo}
             alt="Meridian Edge"
             className="w-[70%] max-w-[340px] h-auto object-contain select-none"
             draggable={false}
+            // If a configured custom logo fails to load, fall back to the bundled default.
+            onError={(e) => { if (customLogoUrl) { setCustomLogoUrl(null); (e.currentTarget as HTMLImageElement).src = stackedLogo; } }}
           />
-          <div className="mt-12 max-w-md">
-            <h1 className="text-3xl font-bold leading-tight">Review electronically stored information with clarity and control.</h1>
-            <p className="mt-4 text-slate-300 leading-relaxed">
-              A calm, defensible environment for investigators to load, search, view and review Concordance-format evidence —
-              built for secure and air-gapped networks.
-            </p>
-            <ul className="mt-8 inline-block text-left space-y-3 text-sm text-slate-300">
-              <li className="flex items-center gap-2"><ShieldCheck size={18} className="text-accent-light" /> Per-case role-based access control</li>
-              <li className="flex items-center gap-2"><ShieldCheck size={18} className="text-accent-light" /> Full audit trail for law-enforcement defensibility</li>
-              <li className="flex items-center gap-2"><ShieldCheck size={18} className="text-accent-light" /> Zero external runtime dependencies</li>
-            </ul>
-          </div>
+          <p className="mt-6 text-lg tracking-wide text-slate-200">ESI Review Platform</p>
         </div>
 
-        <div className="relative text-center text-xs text-slate-400">Powered by Meridian Edge Ltd · Authorised use only</div>
+        <div className="relative text-center text-xs text-slate-400">Powered by Meridian Edge - Authorised use only</div>
       </div>
 
       {/* Form panel (light) */}
       <div className="flex items-center justify-center bg-slate-50 p-6">
         <div className="w-full max-w-sm">
-          {/* Mobile/narrow: dark-on-light logo above the card (charcoal icon + wordmark) */}
-          <div className="md:hidden mb-8 flex justify-center"><Wordmark /></div>
+          {/* Mobile/narrow: logo + platform caption above the card (dark-on-light treatment) */}
+          <div className="md:hidden mb-8 flex flex-col items-center gap-2">
+            {customLogoUrl
+              ? <img src={customLogoUrl} alt="Meridian Edge" className="h-12 w-auto object-contain" draggable={false} onError={() => setCustomLogoUrl(null)} />
+              : <Wordmark />}
+            <p className="text-sm tracking-wide text-slate-500">ESI Review Platform</p>
+          </div>
           <div className="card p-8">
             <div className="mb-6">
               <div className="flex items-center gap-2 text-navy-900"><Lock size={18} className="text-accent" /><h2 className="text-lg font-bold">Sign in</h2></div>
@@ -84,7 +94,6 @@ export default function Login() {
               <button className="btn-primary w-full" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
             </form>
           </div>
-          <p className="mt-4 text-center text-xs text-slate-400">Meridian Edge · ESI Review Platform</p>
         </div>
       </div>
     </div>

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
 import { query, withTx } from '../db';
@@ -7,8 +8,15 @@ import { hashPassword } from '../lib/auth';
 import { audit } from '../lib/audit';
 import { AuthedRequest, requireAuth, requireSystemAdmin } from '../middleware/auth';
 import { getSeatInfo } from '../lib/license';
+import { detectMimeFromBytes } from '../lib/fileType';
+import { getLoginLogo, setSetting, clearSetting, LOGIN_LOGO_KEY } from '../lib/settings';
 
 const router = Router();
+
+// In-memory upload for the branding login logo. Cosmetic branding only; capped at
+// 2 MB — a logo is a small asset and this is never an ESI/ingestion path.
+const LOGO_MAX_BYTES = 2 * 1024 * 1024;
+const brandingUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: LOGO_MAX_BYTES, files: 1 } });
 
 // Seat-cap guard. Returns an error message to send with 409 if making one more
 // user active would exceed (or there is no licence covering) the licensed seats;
@@ -351,6 +359,99 @@ router.delete('/cases/:id', requireAuth, requireSystemAdmin, async (req: AuthedR
   }
 
   res.json({ ok: true, deleted: { id, name: c.name, documents: docCount } });
+});
+
+// ---- Login branding (cosmetic, admin-only) ---------------------------------
+// Upload/replace or clear the login-page logo shown on the pre-auth login screen.
+// This is DISPLAY/BRANDING ONLY — it stores a single admin-provided image and does
+// NOT add any ESI processing, ingestion, collection or forensic capability.
+
+// Validate an uploaded buffer is a supported raster/vector image (PNG/JPEG/SVG) by
+// content, not by the client-declared extension. Returns the canonical MIME + file
+// extension, or null if it is not an accepted image.
+function validateLogoImage(buf: Buffer): { mime: string; ext: string } | null {
+  const detected = detectMimeFromBytes(buf);
+  if (detected === 'image/png') return { mime: 'image/png', ext: 'png' };
+  if (detected === 'image/jpeg') return { mime: 'image/jpeg', ext: 'jpg' };
+  // SVG is text/XML — detectMimeFromBytes doesn't cover it, so sniff explicitly.
+  const head = buf.subarray(0, Math.min(buf.length, 2000)).toString('utf8').trim();
+  if (/^<\?xml[\s\S]*<svg[\s>]/i.test(head) || /^<svg[\s>]/i.test(head)) {
+    return { mime: 'image/svg+xml', ext: 'svg' };
+  }
+  return null;
+}
+
+// Current login-logo status (admin view). Mirrors the public /api/branding shape but
+// is gated and includes the original filename + who uploaded it.
+router.get('/branding/login-logo', requireAuth, requireSystemAdmin, async (_req, res) => {
+  const logo = await getLoginLogo();
+  if (!logo) return res.json({ set: false });
+  res.json({
+    set: true,
+    url: '/api/branding/login-logo',
+    mime: logo.mime,
+    filename: logo.originalFilename,
+    uploadedBy: logo.uploadedBy,
+    uploadedAt: logo.uploadedAt,
+  });
+});
+
+router.post('/branding/login-logo', requireAuth, requireSystemAdmin, brandingUpload.single('logo'), async (req: AuthedRequest, res) => {
+  const file = req.file;
+  if (!file || !file.buffer || !file.buffer.length) {
+    return res.status(400).json({ error: 'Please choose a PNG, JPEG or SVG image file (field name "logo").' });
+  }
+  if (file.buffer.length > LOGO_MAX_BYTES) {
+    return res.status(400).json({ error: 'Logo is too large. Maximum size is 2 MB.' });
+  }
+  const kind = validateLogoImage(file.buffer);
+  if (!kind) {
+    return res.status(400).json({ error: 'Unsupported file. Upload a PNG, JPEG or SVG image.' });
+  }
+
+  const brandingDir = path.join(config.uploadsDir, 'branding');
+  fs.mkdirSync(brandingDir, { recursive: true });
+
+  // Remove any previously stored logo file so we don't orphan blobs on replace.
+  const prev = await getLoginLogo();
+  if (prev?.storedPath) {
+    const prevAbs = path.resolve(config.uploadsDir, prev.storedPath);
+    if (prevAbs.startsWith(path.resolve(config.uploadsDir) + path.sep)) {
+      try { fs.rmSync(prevAbs, { force: true }); } catch { /* ignore */ }
+    }
+  }
+
+  const storedName = `login-logo-${Date.now()}.${kind.ext}`;
+  const storedPath = path.join('branding', storedName); // relative to uploadsDir
+  fs.writeFileSync(path.join(brandingDir, storedName), file.buffer);
+
+  const uploadedAt = new Date().toISOString();
+  await setSetting(
+    LOGIN_LOGO_KEY,
+    {
+      storedPath,
+      originalFilename: file.originalname || storedName,
+      mime: kind.mime,
+      uploadedBy: req.user!.id,
+      uploadedAt,
+    },
+    req.user!.id
+  );
+  await audit({ userId: req.user!.id, action: 'branding_logo_set', target: 'login_logo', detail: `${file.originalname || storedName} (${kind.mime}, ${file.buffer.length} bytes)` });
+  res.json({ set: true, url: '/api/branding/login-logo', mime: kind.mime, filename: file.originalname || storedName, uploadedAt });
+});
+
+router.delete('/branding/login-logo', requireAuth, requireSystemAdmin, async (req: AuthedRequest, res) => {
+  const prev = await getLoginLogo();
+  if (prev?.storedPath) {
+    const prevAbs = path.resolve(config.uploadsDir, prev.storedPath);
+    if (prevAbs.startsWith(path.resolve(config.uploadsDir) + path.sep)) {
+      try { fs.rmSync(prevAbs, { force: true }); } catch { /* ignore */ }
+    }
+  }
+  await clearSetting(LOGIN_LOGO_KEY);
+  await audit({ userId: req.user!.id, action: 'branding_logo_cleared', target: 'login_logo' });
+  res.json({ set: false });
 });
 
 export default router;

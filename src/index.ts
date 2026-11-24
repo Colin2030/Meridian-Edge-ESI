@@ -17,6 +17,7 @@ import tokenRoutes from './routes/tokens';
 import v1Routes from './routes/v1';
 import licenceRoutes from './routes/licenses';
 import savedSearchRoutes from './routes/savedSearches';
+import brandingRoutes from './routes/branding';
 import { refreshLicenceCache } from './lib/license';
 import { startImportWorker } from './lib/importQueue';
 import { reconcileBatchesOnBoot } from './lib/batchRunner';
@@ -64,6 +65,9 @@ app.use((req, _res, next) => {
 });
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'meridian-edge' }));
+// Public branding (no auth): the login page is pre-authentication and must be able
+// to load the custom login logo + the "is a custom logo set" flag without a session.
+app.use('/api', brandingRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/cases', importRoutes);
 app.use('/api/cases', caseDataRoutes);
