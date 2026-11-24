@@ -25,6 +25,9 @@ interface DocDetail {
 interface ThreadMsg {
   id: number; controlNumber: string; subject: string; from: string; to: string;
   date: string; reviewStatus: string; current: boolean; position?: number | null;
+  // Display-only de-dup: number of duplicate copies collapsed into this distinct
+  // message (>=1), and the collapsed copies' control numbers.
+  copyCount?: number; duplicateControlNumbers?: string[];
 }
 interface TextVersion {
   id: number; language: string; kind: string; isOriginal: boolean;
@@ -346,6 +349,12 @@ export default function DocumentViewer() {
                           <span className="flex items-center gap-1.5 mt-0.5">
                             <span className={`inline-block h-2 w-2 rounded-full ${trm.cls}`} title={trm.label} />
                             <span className="text-xs text-slate-400 truncate">{msg.controlNumber}</span>
+                            {!!msg.copyCount && msg.copyCount > 1 && (
+                              <span
+                                className="text-[10px] text-slate-400 whitespace-nowrap"
+                                title={`This message appears ${msg.copyCount} times in the load (duplicate copies collapsed)${msg.duplicateControlNumbers && msg.duplicateControlNumbers.length ? ': ' + msg.duplicateControlNumbers.join(', ') : ''}`}
+                              >· {msg.copyCount} copies</span>
+                            )}
                             {msg.current && <span className="text-[10px] uppercase tracking-wide text-accent-dark font-semibold">· viewing</span>}
                           </span>
                         </span>

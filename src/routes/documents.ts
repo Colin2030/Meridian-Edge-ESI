@@ -7,7 +7,7 @@ import { config } from '../config';
 import { audit } from '../lib/audit';
 import { AuthedRequest, requireAuth, requireCaseRole } from '../middleware/auth';
 import { fileTypeBucketSql } from '../lib/fileType';
-import { displayDateSql, displaySubjectSql } from '../lib/displayFields';
+import { displayDateSql, displaySubjectSql, threadDedupKeySql } from '../lib/displayFields';
 import {
   parsePatternOptions, buildPattern, regexOperator, validatePattern,
   queryWithTimeout, PatternError, buildJsRegex, makeSnippet, leadingExcerpt,
@@ -132,7 +132,9 @@ export const listDocumentsHandler = async (req: AuthedRequest, res: any) => {
     SELECT d.id, d.control_number, d.native_type, d.native_mime, d.native_filename, d.page_count, d.has_text, d.created_at,
            d.metadata, d.thread_id, d.thread_subject, rs.status AS review_status, ${rankSelect}${extraSelect},
            CASE WHEN d.thread_id IS NULL THEN 1
-                ELSE (SELECT count(*)::int FROM documents dt WHERE dt.case_id=d.case_id AND dt.thread_id=d.thread_id)
+                ELSE (SELECT count(DISTINCT ${threadDedupKeySql('dt')})::int
+                        FROM documents dt
+                       WHERE dt.case_id=d.case_id AND dt.thread_id=d.thread_id AND dt.deleted_at IS NULL)
            END AS thread_count,
            EXISTS (SELECT 1 FROM bookmarks b WHERE b.document_id=d.id AND b.user_id=$${bmParam}) AS bookmarked,
            COALESCE((SELECT json_agg(json_build_object('id',t.id,'name',t.name,'colour',t.colour))
@@ -330,11 +332,17 @@ router.get('/documents/:docId', requireAuth, async (req: AuthedRequest, res) => 
   const comments = (await query<any>(`SELECT c.id, c.body, c.created_at, u.display_name, u.username FROM comments c JOIN users u ON u.id=c.user_id WHERE c.document_id=$1 ORDER BY c.created_at ASC`, [docId])).rows;
 
   await audit({ userId: req.user!.id, caseId: doc.case_id, action: 'document_view', target: doc.control_number });
-  // Conversation thread (view-only): count other messages in the same thread so
-  // the viewer knows whether to offer a thread panel.
+  // Conversation thread (view-only): count the DISTINCT messages in the thread
+  // (collapsing duplicate copies by the same dedup key the panel uses) so the
+  // "{n} messages" badge matches the deduplicated Conversation panel and the panel
+  // is hidden when a thread is really a single message copied N times.
   let threadCount = 1;
   if (doc.thread_id) {
-    threadCount = (await query<any>(`SELECT count(*)::int AS n FROM documents WHERE case_id=$1 AND thread_id=$2`, [doc.case_id, doc.thread_id])).rows[0].n;
+    threadCount = (await query<any>(
+      `SELECT count(DISTINCT ${threadDedupKeySql('d')})::int AS n
+       FROM documents d WHERE d.case_id=$1 AND d.thread_id=$2 AND d.deleted_at IS NULL`,
+      [doc.case_id, doc.thread_id]
+    )).rows[0].n;
   }
 
   // A native is available either via the content-addressed blob store (batch
@@ -374,14 +382,21 @@ router.get('/documents/:docId/thread', requireAuth, async (req: AuthedRequest, r
   if (!role) return res.status(403).json({ error: 'No access to this case' });
   if (!threadId) return res.json({ threadId: null, messages: [] });
 
-  // Order by the resolved document date (Concordance DATE then EDRM Date Sent),
-  // falling back to control number for stable ordering when dates are absent/equal.
   // Order by the supplied thread position first (request 6), then fall back to the
-  // resolved document date, then control number for stable ordering.
-  const messages = (await query<any>(
+  // resolved document date (Concordance DATE then EDRM Date Sent), then control
+  // number for stable ordering when dates are absent/equal.
+  //
+  // DISPLAY-ONLY de-duplication: the source loadfile is content-deduplicated but not
+  // document-deduplicated, so a subject-grouped thread collects every duplicate copy
+  // of the same message (same native blob / date / from). We collapse exact
+  // duplicates by threadDedupKeySql so the Conversation panel shows the DISTINCT
+  // messages in the chain, each linking to a representative document. No rows are
+  // changed or deleted; this is purely how the thread is presented.
+  const members = (await query<any>(
     `SELECT d.id, d.control_number, d.metadata, d.thread_position, d.thread_size,
             ${displayDateSql('d.metadata')} AS date_sent,
             ${displaySubjectSql('d.metadata')} AS subject,
+            ${threadDedupKeySql('d')} AS dedup_key,
             rs.status AS review_status
      FROM documents d LEFT JOIN review_states rs ON rs.document_id=d.id
      WHERE d.case_id=$1 AND d.thread_id=$2 AND d.deleted_at IS NULL
@@ -389,20 +404,53 @@ router.get('/documents/:docId/thread', requireAuth, async (req: AuthedRequest, r
     [caseId, threadId]
   )).rows;
 
+  // Group members by dedup key, preserving first-appearance (chronological) order.
+  // All members of a group share the same content/date, so the group's chronological
+  // position is well-defined by whichever copy appears first in the ordered result.
+  const groups: any[][] = [];
+  const indexByKey = new Map<string, number>();
+  for (const m of members) {
+    const key = m.dedup_key ?? `__id:${m.id}`; // never-null guard; distinct per row if somehow empty
+    let idx = indexByKey.get(key);
+    if (idx === undefined) {
+      idx = groups.length;
+      indexByKey.set(key, idx);
+      groups.push([]);
+    }
+    groups[idx].push(m);
+  }
+
+  const messages = groups.map((grp) => {
+    // Deterministic representative: the currently-viewed doc if it is in this group,
+    // otherwise the member with the lowest control_number.
+    const rep =
+      grp.find((m) => m.id === docId) ||
+      grp.slice().sort((a, b) => String(a.control_number).localeCompare(String(b.control_number)))[0];
+    const duplicateControlNumbers = grp
+      .filter((m) => m.id !== rep.id)
+      .map((m) => m.control_number);
+    return {
+      id: rep.id,
+      controlNumber: rep.control_number,
+      subject: rep.subject || rep.control_number,
+      from: rep.metadata?.FROM || rep.metadata?.['Email From'] || '',
+      to: rep.metadata?.TO || rep.metadata?.['Email To'] || '',
+      date: rep.date_sent || '',
+      position: rep.thread_position,
+      reviewStatus: rep.review_status || 'unreviewed',
+      // Mark the representative row current when the viewed doc is in this group.
+      current: grp.some((m) => m.id === docId),
+      // Number of collapsed copies (>=1). The UI shows "· N copies" when > 1.
+      copyCount: grp.length,
+      duplicateControlNumbers,
+    };
+  });
+
   res.json({
     threadId,
-    threadSize: messages[0]?.thread_size || messages.length,
-    messages: messages.map((m) => ({
-      id: m.id,
-      controlNumber: m.control_number,
-      subject: m.subject || m.control_number,
-      from: m.metadata?.FROM || m.metadata?.['Email From'] || '',
-      to: m.metadata?.TO || m.metadata?.['Email To'] || '',
-      date: m.date_sent || '',
-      position: m.thread_position,
-      reviewStatus: m.review_status || 'unreviewed',
-      current: m.id === docId,
-    })),
+    // threadSize now reflects the DISTINCT message count shown in the panel.
+    threadSize: messages.length,
+    messages,
   });
 });
 

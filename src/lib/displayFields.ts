@@ -119,3 +119,33 @@ export function displaySubjectSql(metaCol = 'metadata'): string {
     NULLIF(${metaCol}->>'File Name',''),
     NULLIF(${metaCol}->>'FILENAME',''))`;
 }
+
+/**
+ * DISPLAY-ONLY thread de-duplication key (view-only).
+ *
+ * Source loadfiles are frequently content-deduplicated but NOT document-
+ * deduplicated: many DocIDs reference the SAME native blob. Threads are grouped by
+ * normalised subject (see threading.ts), so a thread collects every duplicate
+ * copy. For the Conversation panel we want the DISTINCT messages in the chain, so
+ * we collapse members that resolve to the same key. This is a pure display helper:
+ * it changes no rows, no ingestion, no native_type, and no thread derivation.
+ *
+ * Key precedence (first non-empty):
+ *   1. native_sha256 (content hash) — authoritative when present (batch ingest).
+ *   2. Extension-stripped basename of native_path — for loadfile/EDRM imports the
+ *      blob filename IS the content SHA (e.g. case-22/native/<sha>.bin), so this is
+ *      an equivalent content key when native_sha256 is not populated.
+ *   3. lower(Email From | normalised subject | Date Sent) — last-resort metadata
+ *      key for the rare member with neither a hash nor a native path.
+ *
+ * `alias` is the table alias for the documents row (e.g. 'd' or 'dt').
+ */
+export function threadDedupKeySql(alias = 'd'): string {
+  const meta = `${alias}.metadata`;
+  // basename of native_path, then strip a single trailing extension.
+  const basename = `NULLIF(regexp_replace(regexp_replace(${alias}.native_path, '^.*/', ''), '\\.[^.]*$', ''), '')`;
+  // normalise subject: lower-case and strip leading Re:/Fwd:/Fw:/AW: prefixes.
+  const subjNorm = `regexp_replace(lower(coalesce(${meta}->>'Email Subject', ${meta}->>'SUBJECT', '')), '^((re|fwd|fw|aw)\\s*:\\s*)+', '', 'g')`;
+  const metaKey = `lower(coalesce(${meta}->>'Email From', ${meta}->>'FROM', '') || '|' || (${subjNorm}) || '|' || coalesce(${meta}->>'Date Sent', ${meta}->>'DATE', ''))`;
+  return `COALESCE(NULLIF(${alias}.native_sha256,''), ${basename}, ${metaKey})`;
+}
